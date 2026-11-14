@@ -1,0 +1,23 @@
+# Rust build and release output
+/target/
+/dist/
+/artifacts/
+
+# Local design, research and implementation handoff (intentionally untracked)
+/docs/design.md
+/docs/implementation-handoff.md
+/docs/research/
+/docs/local/
+/docs/plans/
+
+# Local credentials, state and logs
+/.local/
+/.env
+/.env.*
+!/.env.example
+*.log
+
+# Editor and OS files
+/.idea/
+.DS_Store
+Thumbs.db

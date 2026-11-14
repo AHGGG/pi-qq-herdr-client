@@ -29,6 +29,7 @@ struct Close {
     created: Instant,
 }
 pub struct Router {
+    pub expected_scope: Option<String>,
     pub hub: Hub,
     pub outbox: Outbox,
     pub core: Arc<RwLock<Option<Core>>>,
@@ -45,6 +46,7 @@ impl Router {
         config: Arc<RwLock<Config>>,
     ) -> Self {
         Self {
+            expected_scope: None,
             hub,
             outbox,
             core,
@@ -61,7 +63,14 @@ impl Router {
         buttons: &[(&str, String)],
     ) -> Result<()> {
         self.outbox
-            .enqueue(text, source, keyboard(buttons), !buttons.is_empty(), None)
+            .enqueue(
+                self.expected_scope.as_deref(),
+                text,
+                source,
+                keyboard(buttons),
+                !buttons.is_empty(),
+                None,
+            )
             .await?;
         Ok(())
     }
@@ -705,8 +714,12 @@ impl Router {
             return Ok(());
         }
         let reference = format!("p{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
+        let display = markdown_text(text);
+        if display.chars().count() > 18000 {
+            bail!("权限内容超出手机显示范围，请在终端处理");
+        }
         let text = format!(
-            "需要权限 · {reference}\n\n{text}\n\n允许一次：/approve {reference}\n拒绝：/deny {reference}"
+            "需要权限 · {reference}\n\n{display}\n\n允许一次：/approve {reference}\n拒绝：/deny {reference}"
         );
         self.permissions.insert(
             reference.clone(),
@@ -925,6 +938,16 @@ pub fn keyboard(buttons: &[(&str, String)]) -> Option<Value> {
     }
     let rows:Vec<_>=buttons.chunks(2).take(5).enumerate().map(|(row,buttons)|json!({"buttons":buttons.iter().enumerate().map(|(col,(label,command))|json!({"id":format!("{row}-{col}"),"render_data":{"label":label,"visited_label":label,"style":1},"action":{"type":2,"permission":{"type":2},"data":command,"enter":!command.ends_with([' ','=']),"reply":false,"unsupport_tips":"请发送文字指令"}})).collect::<Vec<_>>()})).collect();
     Some(json!({"content":{"rows":rows}}))
+}
+fn markdown_text(text: &str) -> String {
+    let mut result = String::new();
+    for c in text.chars() {
+        if "\\`*_{}[]()#+.!<>|~-".contains(c) {
+            result.push('\\');
+        }
+        result.push(c);
+    }
+    result
 }
 fn command_link(command: &str, label: &str) -> String {
     let text = format!("{command} · {}", clean(label, 65));

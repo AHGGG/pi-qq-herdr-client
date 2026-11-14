@@ -27,6 +27,7 @@ pub struct Credentials {
 pub struct Snapshot {
     pub config: Config,
     pub core_ready: bool,
+    pub core_error: Option<String>,
     pub qq_ready: bool,
     pub owner_bound: bool,
     pub dependencies_ready: bool,

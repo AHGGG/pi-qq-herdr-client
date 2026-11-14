@@ -21,7 +21,7 @@ pub struct Binding {
     pub ready: bool,
 }
 impl Binding {
-    fn scope(&self) -> String {
+    pub fn scope(&self) -> String {
         format!("{}:{}", self.app_id, self.owner)
     }
 }
@@ -55,6 +55,7 @@ pub struct Outbox {
     notify: Arc<Notify>,
 }
 pub struct Accepted {
+    pub scope: String,
     pub source: String,
     pub references: Vec<String>,
 }
@@ -75,6 +76,7 @@ impl Outbox {
     }
     pub async fn enqueue(
         &self,
+        expected_scope: Option<&str>,
         text: &str,
         source: Option<&str>,
         keyboard: Option<Value>,
@@ -89,16 +91,15 @@ impl Outbox {
             .borrow()
             .clone()
             .context("请先在桌面完成 QQ 授权和用户配对")?;
+        if expected_scope.is_some_and(|scope| scope != binding.scope()) {
+            bail!("QQ 绑定已改变，此操作的回执不会发给新账号");
+        }
         let mut state = self.saved.lock().await;
         if state.pending.len() >= 100 {
             bail!("待发队列已满，请在桌面检查发送状态");
         }
         let id = Uuid::new_v4().to_string();
-        let chars: Vec<_> = text.chars().collect();
-        let parts = chars
-            .chunks(1800)
-            .map(|chunk| chunk.iter().collect())
-            .collect();
+        let parts = text_parts(text);
         state.pending.push(Record {
             id: id.clone(),
             scope: binding.scope(),
@@ -136,13 +137,17 @@ impl Outbox {
         let state = self.saved.lock().await;
         json!({"pending":state.pending.iter().filter(|r| !r.failed).count(),"failed":state.pending.iter().filter(|r| r.failed).count()})
     }
-    pub async fn recovered_sources(&self) -> Vec<Accepted> {
+    pub async fn recovered_sources(&self, scope: Option<&str>) -> Vec<Accepted> {
         let state = self.saved.lock().await;
         state
             .receipts
             .iter()
             .filter_map(|r| {
+                if scope.is_none() || r["scope"].as_str() != scope {
+                    return None;
+                }
                 Some(Accepted {
+                    scope: r["scope"].as_str()?.into(),
                     source: r["source"].as_str()?.into(),
                     references: r["references"]
                         .as_array()?
@@ -186,12 +191,12 @@ impl Outbox {
                                 >= current.parts.len() + usize::from(current.attachment.is_some())
                             {
                                 state.pending.remove(index);
-                                state.receipts.push(json!({"deliveryId":record.id,"state":"sent","sentAt":now(),"source":record.source,"references":references}));
+                                state.receipts.push(json!({"deliveryId":record.id,"state":"sent","sentAt":now(),"scope":record.scope,"source":record.source,"references":references}));
                                 if state.receipts.len() > 100 {
                                     state.receipts.remove(0);
                                 }
                             } else {
-                                state.receipts.push(json!({"deliveryId":record.id,"state":"part_sent","source":record.source,"references":references}));
+                                state.receipts.push(json!({"deliveryId":record.id,"state":"part_sent","scope":record.scope,"source":record.source,"references":references}));
                                 if state.receipts.len() > 100 {
                                     state.receipts.remove(0);
                                 }
@@ -209,7 +214,13 @@ impl Outbox {
                                 }
                             }
                             if let Some(source) = record.source {
-                                let _ = accepted.send(Accepted { source, references }).await;
+                                let _ = accepted
+                                    .send(Accepted {
+                                        scope: record.scope,
+                                        source,
+                                        references,
+                                    })
+                                    .await;
                             }
                         }
                         Err(error) => {
@@ -232,6 +243,26 @@ impl Outbox {
             }
         }
     }
+}
+fn text_parts(text: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut length = 0;
+    for line in text.split_inclusive('\n') {
+        let chars: Vec<_> = line.chars().collect();
+        for chunk in chars.chunks(1800) {
+            if length + chunk.len() > 1800 {
+                parts.push(std::mem::take(&mut current));
+                length = 0;
+            }
+            current.extend(chunk.iter());
+            length += chunk.len();
+        }
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    parts
 }
 fn now() -> u64 {
     SystemTime::now()

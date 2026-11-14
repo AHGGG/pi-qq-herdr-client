@@ -21,6 +21,7 @@ pub struct Catalog {
     pub terminals: Vec<Value>,
     pub workspaces: Vec<Workspace>,
     pub ready: bool,
+    pub error: Option<String>,
 }
 #[derive(Clone)]
 pub struct Core {
@@ -149,7 +150,7 @@ async fn supervise(core: Core, mut rx: mpsc::Receiver<Request>) {
             let hello: Value = serde_json::from_str(&tokio::time::timeout(Duration::from_secs(15), lines.next_line()).await??.context("Herdr 已断开")?)?;
             let result = &hello["result"];
             if result["generation"] != 1 || !result["methods"].as_array().is_some_and(|ms| ["terminal.run", "doc.get", "terminal.read", "terminal.list"].iter().all(|m| ms.contains(&json!(m)))) { bail!("Herdr Core 版本或能力不支持"); }
-            { let mut cat = core.catalog.write().await; cat.core_id = result["core"]["id"].as_str().unwrap_or_default().into(); cat.ready = true; }
+            { let mut cat = core.catalog.write().await; cat.core_id = result["core"]["id"].as_str().unwrap_or_default().into(); cat.ready = true; cat.error = None; }
             let mut pending: HashMap<u64, oneshot::Sender<Result<Value>>> = HashMap::new();
             let mut next_id = 0u64;
             let result: Result<()> = async {
@@ -182,11 +183,16 @@ async fn supervise(core: Core, mut rx: mpsc::Receiver<Request>) {
             let _ = child.kill().await; let _ = child.wait().await;
             result
         }.await;
-        core.catalog.write().await.ready = false;
+        {
+            let mut catalog = core.catalog.write().await;
+            catalog.ready = false;
+            catalog.error = attempt
+                .err()
+                .map(|error| format!("Herdr 连接失败：{error}。请检查安装和路径后重试。"));
+        }
         if rx.is_closed() {
             return;
         }
-        let _ = attempt;
         let pause = tokio::time::sleep(Duration::from_secs(2));
         tokio::pin!(pause);
         loop {

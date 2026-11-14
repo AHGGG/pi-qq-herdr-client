@@ -257,7 +257,7 @@ impl Hub {
                 );
                 let receipt = self
                     .outbox
-                    .enqueue(&text, Some(&session.id), None, false, attachment)
+                    .enqueue(None, &text, Some(&session.id), None, false, attachment)
                     .await?;
                 Ok(Some(receipt))
             }

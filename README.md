@@ -45,7 +45,7 @@ cargo check --workspace
 cargo build --release -p pi-qq-herdr-client -j 4
 ```
 
-产物为 `target/release/pi-qq-herdr-client.exe`。客户端不附带 Node 或浏览器运行时，Pi 与 Core 使用本机安装。
+产物为 `target/release/pi-qq-herdr-client.exe`。运行 `./scripts/build.ps1` 可同时生成 `dist/pi-qq-herdr-client-windows-x64.zip` 和 SHA256 文件。客户端不附带 Node 或浏览器运行时，Pi 与 Core 使用本机安装。
 
 本项目不编写或运行单元测试。交付检查使用 Rust 编译、扩展语法与格式检查；扫码、手机命令和桌面体验的整体运行验证由使用者完成。
 

@@ -376,6 +376,20 @@ impl ClientWindow {
                 )
                 .into_any_element();
         }
+        if !self.snapshot.dependencies_ready {
+            return div()
+                .flex()
+                .flex_col()
+                .gap_5()
+                .py_8()
+                .child("正在检查运行环境；如有问题，处理提示后重新检测。")
+                .child(
+                    Button::new("retry-dependencies")
+                        .label("重新检测")
+                        .on_click(cx.listener(|this, _, _, cx| this.send(Command::Detect, cx))),
+                )
+                .into_any_element();
+        }
         if let Some(code) = &self.snapshot.pair_code {
             return div()
                 .flex()
@@ -418,13 +432,22 @@ impl ClientWindow {
                 )
                 .into_any_element();
         }
-        if self.snapshot.qq_ready {
+        if self.snapshot.qq_ready || self.snapshot.owner_bound {
             return div()
                 .flex()
                 .flex_col()
                 .gap_5()
                 .py_12()
-                .child(div().text_lg().font_semibold().child("QQ 已连接"))
+                .child(
+                    div()
+                        .text_lg()
+                        .font_semibold()
+                        .child(if self.snapshot.qq_ready {
+                            "QQ 已连接"
+                        } else {
+                            "QQ 正在重连……"
+                        }),
+                )
                 .child(div().text_base().child(if self.snapshot.core_ready {
                     "Herdr 已就绪"
                 } else {
@@ -434,7 +457,11 @@ impl ClientWindow {
                     div()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
-                        .child("可以在手机 QQ 中创建和使用 Pi。"),
+                        .child(if self.snapshot.qq_ready && self.snapshot.core_ready {
+                            "可以在手机 QQ 中创建和使用 Pi。"
+                        } else {
+                            "连接恢复后，可继续在手机 QQ 中使用 Pi。"
+                        }),
                 )
                 .into_any_element();
         }
@@ -512,7 +539,10 @@ impl Render for ClientWindow {
             )
             .child(body)
             .when_some(
-                self.error.clone().or_else(|| self.snapshot.error.clone()),
+                self.error
+                    .clone()
+                    .or_else(|| self.snapshot.error.clone())
+                    .or_else(|| self.snapshot.core_error.clone()),
                 |el, error| el.child(div().text_sm().text_color(cx.theme().danger).child(error)),
             )
             .when_some(self.snapshot.notice.clone(), |el, text| {

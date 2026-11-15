@@ -118,6 +118,20 @@ impl Core {
         ] {
             env.insert(name.into(), json!(""));
         }
+        #[cfg(not(windows))]
+        if let Some(path) = crate::install::search_path() {
+            let mut paths: Vec<_> = self
+                .environment
+                .pi
+                .parent()
+                .map(std::path::PathBuf::from)
+                .into_iter()
+                .collect();
+            paths.extend(std::env::split_paths(&path));
+            if let Ok(path) = std::env::join_paths(paths) {
+                env.insert("PATH".into(), json!(path.to_string_lossy()));
+            }
+        }
         env.insert("PI_CODING_AGENT_DIR".into(), json!(self.environment.agent));
         if let Some(root) = std::env::var_os("PI_QQ_CLIENT_DIR") {
             env.insert("PI_QQ_CLIENT_DIR".into(), json!(root.to_string_lossy()));
@@ -357,6 +371,35 @@ async fn process_belongs(pid: u32, ancestor: u32) -> bool {
     }
     #[cfg(not(windows))]
     {
-        pid == ancestor
+        tokio::time::timeout(Duration::from_secs(4), async {
+            let mut current = pid;
+            for _ in 0..32 {
+                if current == ancestor {
+                    return true;
+                }
+                if current <= 1 {
+                    return false;
+                }
+                let output = match sanitized_command(std::path::Path::new("/bin/ps"))
+                    .args(["-o", "ppid=", "-p", &current.to_string()])
+                    .output()
+                    .await
+                {
+                    Ok(output) if output.status.success() => output,
+                    _ => return false,
+                };
+                let parent = String::from_utf8_lossy(&output.stdout)
+                    .trim()
+                    .parse::<u32>()
+                    .unwrap_or(0);
+                if parent == current {
+                    return false;
+                }
+                current = parent;
+            }
+            false
+        })
+        .await
+        .unwrap_or(false)
     }
 }

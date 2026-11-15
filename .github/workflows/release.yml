@@ -1,4 +1,4 @@
-name: Prepare Windows release
+name: Prepare release
 run-name: Prepare ${{ inputs.bump }} release from ${{ github.ref_name }}
 
 on:
@@ -27,106 +27,200 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
-    runs-on: windows-2025
-    timeout-minutes: 90
-    permissions:
-      contents: write
-    defaults:
-      run:
-        shell: pwsh
-    env:
-      CARGO_TERM_COLOR: always
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
-      - name: Check out selected commit
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
       - name: Require a source branch
+        shell: bash
         run: |
-          if ($env:GITHUB_REF_TYPE -ne 'branch') {
-            throw 'Run this workflow on a branch so the version update can be committed.'
-          }
+          if [[ "$GITHUB_REF_TYPE" != branch ]]; then
+            echo 'Run this workflow on a branch so the version update can be committed.' >&2
+            exit 1
+          fi
 
-      - name: Bump Cargo and Windows versions
+      - name: Bump Cargo and application versions
         id: version
         env:
           VERSION_BUMP: ${{ inputs.bump }}
-        run: |
-          python ./scripts/bump-version.py $env:VERSION_BUMP
-          if ($LASTEXITCODE -ne 0) { throw 'Version update failed.' }
+        run: python scripts/bump-version.py "$VERSION_BUMP"
 
       - name: Refuse an existing tag
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
         run: |
-          $refs = @(gh api "repos/$env:GITHUB_REPOSITORY/git/matching-refs/tags/$env:RELEASE_TAG" --jq '.[].ref')
-          if ($LASTEXITCODE -ne 0) { throw 'Could not check existing release tags.' }
-          if ($refs -ccontains "refs/tags/$env:RELEASE_TAG") {
-            throw "Tag $env:RELEASE_TAG already exists. Existing releases are never overwritten."
-          }
+          refs="$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$RELEASE_TAG" --jq '.[].ref')"
+          if grep -Fxq "refs/tags/$RELEASE_TAG" <<< "$refs"; then
+            echo "Tag $RELEASE_TAG already exists. Existing releases are never overwritten." >&2
+            exit 1
+          fi
+
+      - name: Share exact version files with all builds
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-version
+          path: |
+            Cargo.toml
+            Cargo.lock
+            crates/desktop/assets/app.rc
+          if-no-files-found: error
+
+  build:
+    needs: prepare
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+          - platform: macos-arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+          - platform: macos-x64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - platform: linux-x64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-version
+          path: .
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang cmake ninja-build pkg-config \
+            libgtk-3-dev libayatana-appindicator3-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-randr0-dev \
+            libxcb-xkb-dev libvulkan-dev libegl1-mesa-dev libasound2-dev \
+            libfontconfig1-dev libfreetype6-dev libssl-dev dpkg-dev
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
-      - name: Build and package Windows x64
+      - name: Build Windows EXE
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: ./scripts/build.ps1
+
+      - name: Build macOS or Linux package
+        if: runner.os != 'Windows'
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+          MACOSX_DEPLOYMENT_TARGET: '12.0'
+        shell: bash
+        run: bash scripts/build-unix.sh "$BUILD_TARGET"
 
       - name: Preserve release artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: pi-qq-herdr-client-${{ steps.version.outputs.tag }}-windows-x64
+          name: release-${{ matrix.platform }}
           path: |
-            dist/pi-qq-herdr-client-windows-x64.zip
-            dist/pi-qq-herdr-client-windows-x64.zip.sha256
+            dist/*.exe
+            dist/*.dmg
+            dist/*.deb
+            dist/*.sha256
           if-no-files-found: error
           compression-level: 0
 
-      - name: Commit version and tag after successful build
+  release:
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-version
+          path: .
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify complete release assets
+        shell: bash
+        run: |
+          cd dist
+          for file in pi-qq-herdr-client-windows-x64.exe \
+            pi-qq-herdr-client-macos-arm64.dmg pi-qq-herdr-client-macos-x64.dmg \
+            pi-qq-herdr-client-linux-x64.deb; do
+            test -s "$file"
+            sha256sum --check "$file.sha256"
+          done
+
+      - name: Commit version and tag after all builds succeed
         env:
-          RELEASE_TAG: ${{ steps.version.outputs.tag }}
           RELEASE_BRANCH: ${{ github.ref_name }}
+        shell: bash
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add Cargo.toml Cargo.lock crates/desktop/assets/app.rc
-          if ($LASTEXITCODE -ne 0) { throw 'Could not stage version files.' }
-          git commit -m "chore: release $env:RELEASE_TAG"
-          if ($LASTEXITCODE -ne 0) { throw 'Could not commit the version update.' }
-          git tag -a $env:RELEASE_TAG -m "Release $env:RELEASE_TAG"
-          if ($LASTEXITCODE -ne 0) { throw 'Could not create the release tag.' }
-          git push --atomic origin "HEAD:refs/heads/$env:RELEASE_BRANCH" "refs/tags/$env:RELEASE_TAG"
-          if ($LASTEXITCODE -ne 0) {
-            throw 'Could not push the version and tag. Check branch permissions or concurrent source changes.'
-          }
+          git commit -m "chore: release $RELEASE_TAG"
+          git tag -a "$RELEASE_TAG" -m "Release $RELEASE_TAG"
+          git push --atomic origin "HEAD:refs/heads/$RELEASE_BRANCH" "refs/tags/$RELEASE_TAG"
 
       - name: Create draft release for review
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.version.outputs.tag }}
           RELEASE_PRERELEASE: ${{ inputs.prerelease }}
+        shell: bash
         run: |
-          $releaseArgs = @(
-            'release', 'create', $env:RELEASE_TAG,
-            'dist/pi-qq-herdr-client-windows-x64.zip',
-            'dist/pi-qq-herdr-client-windows-x64.zip.sha256',
-            '--repo', $env:GITHUB_REPOSITORY,
-            '--verify-tag',
-            '--title', $env:RELEASE_TAG,
-            '--generate-notes',
-            '--draft'
-          )
-          if ($env:RELEASE_PRERELEASE -eq 'true') { $releaseArgs += '--prerelease' }
-          $releaseUrl = gh @releaseArgs
-          if ($LASTEXITCODE -ne 0) { throw 'Could not create the draft release. Build artifacts are available in this Actions run.' }
-          @(
-            "Draft release: $releaseUrl",
-            '',
-            'Download and check the ZIP, edit release notes if needed, then click **Publish release** on GitHub.',
-            'This workflow leaves the release as a draft; it does not publish it.'
-          ) | Add-Content -Path $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          release_args=(release create "$RELEASE_TAG" dist/*.exe dist/*.dmg dist/*.deb dist/*.sha256
+            --repo "$GITHUB_REPOSITORY" --verify-tag --title "$RELEASE_TAG" --generate-notes --draft)
+          if [[ "$RELEASE_PRERELEASE" == true ]]; then release_args+=(--prerelease); fi
+          release_url="$(gh "${release_args[@]}")"
+          {
+            printf 'Draft release: %s\n\n' "$release_url"
+            printf 'Windows: standalone EXE. macOS: Apple Silicon / Intel DMG. Linux: x64 DEB (Ubuntu 24.04+).\n\n'
+            printf 'macOS packages are ad-hoc signed, not notarized. Linux requires a graphical desktop and an unlocked Secret Service.\n\n'
+            printf 'Download and check the packages, edit release notes, then click **Publish release** on GitHub.\n'
+            printf 'This workflow leaves the release as a draft; it does not publish it.\n'
+          } >> "$GITHUB_STEP_SUMMARY"

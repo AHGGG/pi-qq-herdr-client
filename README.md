@@ -12,13 +12,13 @@
 
 ## 开始使用
 
-目前支持 **Windows x64**。电脑需要安装 Pi 和 [Herdr Core](https://herdr.dev/)，Herdr App 窗口无需保持打开。
+电脑需要安装 Pi 和 [Herdr Core](https://herdr.dev/)，Herdr App 窗口无需保持打开。
 
-1. 从本仓库的 **Releases** 下载 Windows x64 压缩包，解压后运行 `pi-qq-herdr-client.exe`。
+1. 从本仓库的 [Releases](https://github.com/AHGGG/pi-qq-herdr-client/releases) 下载对应平台的版本：Windows x64 直接运行 `.exe`；macOS 打开 `.dmg`，按 Apple Silicon／Intel 选择；Linux x64 使用 `.deb`（Ubuntu 24.04+）。
 2. 用手机 QQ 扫码，按页面提示选择机器人并完成授权；没有机器人时，可从客户端打开创建入口。
 3. 在机器人私聊中发送 `/sessions`，选择已有 Session；也可以发送 `/new` 创建一个 Pi。随后直接发送任务即可。
 
-首次接入已经运行的 Pi 时，请在它空闲时执行一次 `/reload`。
+首次接入已经运行的 Pi 时，请在它空闲时执行一次 `/reload`。Linux 需要图形桌面和已解锁的系统密钥环。
 
 ## QQ 内的交互
 
@@ -40,7 +40,7 @@
 
 一个 Session 就是一个独立运行的 Pi。
 
-新建 Pi 会使用选中的 Workspace；没有 Workspace 时，会在 Windows 用户主目录启动第一个 Pi。
+新建 Pi 会使用选中的 Workspace；没有 Workspace 时，会在用户主目录启动第一个 Pi。
 
 电脑需要保持开机、联网，客户端也需要保持运行。关闭窗口后会驻留托盘，右键托盘可暂停连接或退出。
 

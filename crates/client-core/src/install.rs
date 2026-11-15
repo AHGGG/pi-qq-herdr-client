@@ -48,8 +48,40 @@ pub fn locate(config: &Config) -> std::result::Result<Environment, Dependency> {
 fn executable(override_path: Option<&Path>, name: &str) -> Option<PathBuf> {
     match override_path {
         Some(p) => p.is_file().then(|| p.to_path_buf()),
-        None => which::which(name).ok(),
+        None => {
+            #[cfg(windows)]
+            {
+                which::which(name).ok()
+            }
+            #[cfg(not(windows))]
+            {
+                which::which_in(name, search_path(), std::env::current_dir().ok()?).ok()
+            }
+        }
     }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn search_path() -> Option<std::ffi::OsString> {
+    let mut paths: Vec<_> = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect())
+        .unwrap_or_default();
+    // Finder/desktop launches do not inherit a terminal's shell PATH.
+    if let Some(dirs) = directories::BaseDirs::new() {
+        for relative in [".pi/agent/bin", ".local/bin", ".cargo/bin", ".volta/bin"] {
+            let path = dirs.home_dir().join(relative);
+            if path.is_dir() && !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+    }
+    for path in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"] {
+        let path = PathBuf::from(path);
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    std::env::join_paths(paths).ok()
 }
 
 pub fn install_extension(env: &Environment) -> Result<bool> {
@@ -118,6 +150,10 @@ pub fn sanitized_command(path: &Path) -> tokio::process::Command {
         {
             command.env(key, value);
         }
+    }
+    #[cfg(not(windows))]
+    if let Some(path) = search_path() {
+        command.env("PATH", path);
     }
     command
         .stdin(Stdio::piped())

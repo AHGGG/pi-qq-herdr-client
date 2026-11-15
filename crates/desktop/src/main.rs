@@ -33,6 +33,7 @@ fn launch() -> anyhow::Result<()> {
         store.request_show()?;
         return Ok(());
     };
+    platform::init()?;
     let client = pi_qq_client_core::start(store)?;
     let quit = client.commands.clone();
     let background = std::env::args().any(|a| a == "--background");

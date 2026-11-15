@@ -84,6 +84,7 @@ impl ClientWindow {
                     .await;
                 if this
                     .update_in(cx, |this, window, cx| {
+                        platform::poll_events();
                         let mut latest = None;
                         while let Ok(event) = events.try_recv() {
                             latest = Some(event);
@@ -237,15 +238,17 @@ impl ClientWindow {
                         .child("Herdr Core 路径（可选）")
                         .child(Input::new(&self.core_path)),
                 )
-                .child(
-                    Checkbox::new("login")
-                        .label("登录后启动")
-                        .checked(self.start_at_login)
-                        .on_click(cx.listener(|this, value, _, cx| {
-                            this.start_at_login = *value;
-                            cx.notify();
-                        })),
-                )
+                .when(cfg!(windows), |el| {
+                    el.child(
+                        Checkbox::new("login")
+                            .label("登录后启动")
+                            .checked(self.start_at_login)
+                            .on_click(cx.listener(|this, value, _, cx| {
+                                this.start_at_login = *value;
+                                cx.notify();
+                            })),
+                    )
+                })
                 .when(
                     self.snapshot.qq_ready
                         && self.snapshot.owner_bound

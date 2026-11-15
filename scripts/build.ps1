@@ -14,22 +14,21 @@ try {
         $ErrorActionPreference = $nativePreference
     }
     if ($cargoExitCode -ne 0) { throw "Release build failed ($cargoExitCode)." }
-    $packageRoot = Join-Path $projectRoot 'dist/pi-qq-herdr-client-windows-x64'
-    New-Item -ItemType Directory -Force $packageRoot | Out-Null
-    Copy-Item 'target/release/pi-qq-herdr-client.exe' $packageRoot -Force
-    Copy-Item 'README.md' $packageRoot -Force
-    $archivePath = Join-Path $projectRoot 'dist/pi-qq-herdr-client-windows-x64.zip'
-    Compress-Archive -Path (Join-Path $packageRoot '*') -DestinationPath $archivePath -Force
+    $distRoot = Join-Path $projectRoot 'dist'
+    New-Item -ItemType Directory -Force $distRoot | Out-Null
+    $exeName = 'pi-qq-herdr-client-windows-x64.exe'
+    $exePath = Join-Path $distRoot $exeName
+    Copy-Item 'target/release/pi-qq-herdr-client.exe' $exePath -Force
     $hasher = [Security.Cryptography.SHA256]::Create()
-    $archiveStream = [IO.File]::OpenRead($archivePath)
+    $exeStream = [IO.File]::OpenRead($exePath)
     try {
-        $digest = ([BitConverter]::ToString($hasher.ComputeHash($archiveStream))).Replace('-', '').ToLowerInvariant()
+        $digest = ([BitConverter]::ToString($hasher.ComputeHash($exeStream))).Replace('-', '').ToLowerInvariant()
     } finally {
-        $archiveStream.Dispose()
+        $exeStream.Dispose()
         $hasher.Dispose()
     }
-    [IO.File]::WriteAllText("$archivePath.sha256", "$digest  pi-qq-herdr-client-windows-x64.zip`n", [Text.UTF8Encoding]::new($false))
-    Write-Output $archivePath
+    [IO.File]::WriteAllText("$exePath.sha256", "$digest  $exeName`n", [Text.UTF8Encoding]::new($false))
+    Write-Output $exePath
     Write-Output "SHA256: $digest"
 } finally {
     Pop-Location

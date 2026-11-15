@@ -88,26 +88,71 @@ impl Store {
         atomic_write(&self.root.join(name), bytes)
     }
     pub fn credentials(&self) -> Result<Option<Credentials>> {
-        let path = self.root.join("credentials.protected");
-        if !path.exists() {
-            return Ok(None);
-        }
-        let bytes = fs::read(path)?;
-        let plain = zeroize::Zeroizing::new(unprotect(&bytes)?);
+        #[cfg(windows)]
+        let bytes = {
+            let path = self.root.join("credentials.protected");
+            if !path.exists() {
+                return Ok(None);
+            }
+            unprotect(&fs::read(path)?)?
+        };
+        #[cfg(not(windows))]
+        let bytes = match self.credential_entry()?.get_secret() {
+            Ok(bytes) => bytes,
+            Err(keyring::Error::NoEntry) => return Ok(None),
+            Err(error) => return Err(error).context("无法读取系统凭据库中的 QQ 授权"),
+        };
+        let plain = zeroize::Zeroizing::new(bytes);
         Ok(Some(
             serde_json::from_slice(&plain).context("保存的 QQ 授权无法读取，请重新绑定")?,
         ))
     }
     pub fn save_credentials(&self, credentials: &Credentials) -> Result<()> {
         let plain = zeroize::Zeroizing::new(serde_json::to_vec(credentials)?);
-        self.write("credentials.protected", &protect(&plain)?)
+        #[cfg(windows)]
+        {
+            self.write("credentials.protected", &protect(&plain)?)
+        }
+        #[cfg(not(windows))]
+        {
+            self.credential_entry()?
+                .set_secret(&plain)
+                .context("无法将 QQ 授权保存到系统凭据库")
+        }
     }
     pub fn forget_credentials(&self) -> Result<()> {
-        match fs::remove_file(self.root.join("credentials.protected")) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e.into()),
+        #[cfg(windows)]
+        {
+            match fs::remove_file(self.root.join("credentials.protected")) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e.into()),
+            }
         }
+        #[cfg(not(windows))]
+        {
+            match self.credential_entry()?.delete_credential() {
+                Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+                Err(error) => Err(error).context("无法删除系统凭据库中的 QQ 授权"),
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    fn credential_entry(&self) -> Result<keyring::Entry> {
+        use sha1::{Digest, Sha1};
+        if let Err(error) = keyring::Entry::store_status() {
+            bail!(
+                "系统凭据库不可用：{error}。macOS 请解锁登录钥匙串；Linux 请启用并解锁 Secret Service（如 GNOME Keyring）。"
+            );
+        }
+        // Keep independent PI_QQ_CLIENT_DIR environments in separate entries.
+        let root = self.root.canonicalize()?;
+        let account = format!(
+            "credentials-{:x}",
+            Sha1::digest(root.as_os_str().as_encoded_bytes())
+        );
+        keyring::Entry::new("pi-qq-herdr-client", &account)
+            .context("无法打开系统凭据库中的 QQ 授权条目")
     }
 }
 
@@ -190,12 +235,4 @@ fn crypt(bytes: &[u8], encrypt: bool) -> Result<Vec<u8>> {
         LocalFree(output.pbData as *mut _);
         Ok(result)
     }
-}
-#[cfg(not(windows))]
-fn protect(_: &[u8]) -> Result<Vec<u8>> {
-    bail!("当前版本的凭据保护仅支持 Windows")
-}
-#[cfg(not(windows))]
-fn unprotect(_: &[u8]) -> Result<Vec<u8>> {
-    bail!("当前版本的凭据保护仅支持 Windows")
 }

@@ -22,6 +22,9 @@ raw-window-handle = "0.6"
 [build-dependencies]
 embed-resource = "=3.0.12"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
 windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader"] }

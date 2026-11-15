@@ -1,6 +1,19 @@
 use anyhow::Result;
 use gpui_kit::{App, Window};
 
+pub fn init() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    gtk::init()?;
+    Ok(())
+}
+
+pub fn poll_events() {
+    #[cfg(target_os = "linux")]
+    while gtk::events_pending() {
+        gtk::main_iteration_do(false);
+    }
+}
+
 pub fn set_window_icon(window: &mut Window) {
     #[cfg(windows)]
     {

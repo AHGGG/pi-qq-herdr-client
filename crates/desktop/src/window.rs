@@ -28,7 +28,6 @@ pub struct ClientWindow {
     confirm_rebind: bool,
     start_at_login: bool,
     error: Option<String>,
-    directory: Entity<InputState>,
     pi_path: Entity<InputState>,
     core_path: Entity<InputState>,
     qr_url: Option<String>,
@@ -47,7 +46,6 @@ impl ClientWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let directory = cx.new(|cx| InputState::new(window, cx).placeholder("用户主目录"));
         let pi_path = cx.new(|cx| InputState::new(window, cx).placeholder("自动检测"));
         let core_path = cx.new(|cx| InputState::new(window, cx).placeholder("自动检测"));
         let menu = Menu::new();
@@ -142,7 +140,6 @@ impl ClientWindow {
             confirm_rebind: false,
             start_at_login: false,
             error: None,
-            directory,
             pi_path,
             core_path,
             qr_url: None,
@@ -179,9 +176,6 @@ impl ClientWindow {
     }
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let config = &self.snapshot.config;
-        self.directory.update(cx, |s, cx| {
-            s.set_value(path_text(&config.default_directory), window, cx)
-        });
         self.pi_path.update(cx, |s, cx| {
             s.set_value(path_text(&config.pi_path), window, cx)
         });
@@ -206,20 +200,10 @@ impl ClientWindow {
             (!s.is_empty()).then(|| PathBuf::from(s))
         };
         let config = Config {
-            default_directory: optional(self.directory.read(cx).value().to_string()),
             pi_path: optional(self.pi_path.read(cx).value().to_string()),
             core_path: optional(self.core_path.read(cx).value().to_string()),
             start_at_login: self.start_at_login,
         };
-        if config
-            .default_directory
-            .as_ref()
-            .is_some_and(|p| !p.is_dir())
-        {
-            self.error = Some("默认目录不存在，请重新选择。".into());
-            cx.notify();
-            return;
-        }
         if config.start_at_login != self.snapshot.config.start_at_login {
             if let Err(e) = platform::set_start_at_login(config.start_at_login) {
                 self.error = Some(format!("登录启动设置失败：{e}"));
@@ -230,28 +214,6 @@ impl ClientWindow {
         self.send(Command::Save(config), cx);
         self.settings = false;
     }
-    fn pick_directory(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let result = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("选择默认工作目录".into()),
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            let result = result.await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                if let Ok(Ok(Some(paths))) = result {
-                    if let Some(path) = paths.first() {
-                        this.directory.update(cx, |s, cx| {
-                            s.set_value(path.to_string_lossy().to_string(), window, cx)
-                        });
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
     fn body(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if self.settings {
             return div()
@@ -259,19 +221,6 @@ impl ClientWindow {
                 .flex_col()
                 .gap_5()
                 .child(div().text_lg().font_semibold().child("设置"))
-                .child(
-                    div().flex().flex_col().gap_2().child("默认工作目录").child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(Input::new(&self.directory))
-                            .child(
-                                Button::new("folder")
-                                    .label("选择")
-                                    .on_click(cx.listener(Self::pick_directory)),
-                            ),
-                    ),
-                )
                 .child(
                     div()
                         .flex()

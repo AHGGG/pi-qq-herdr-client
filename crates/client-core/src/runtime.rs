@@ -72,7 +72,7 @@ async fn run(
     let (route_tx, mut route_rx) = mpsc::channel(128);
     let (errors, mut error_rx) = mpsc::unbounded_channel::<String>();
     let (menu_results, mut menu_rx) = mpsc::unbounded_channel::<(String, Option<String>)>();
-    let mut router = Router::new(hub.clone(), outbox.clone(), core.clone(), config.clone());
+    let mut router = Router::new(hub.clone(), outbox.clone(), core.clone());
     let routing_http = http.clone();
     // User tasks can take time (new Pi registration, file transfer). They must not
     // hold up QR cancellation, desktop state, account changes or shutdown.
@@ -225,13 +225,18 @@ async fn run(
                             routes.selected = None; routes.workspace = None; routes.sources.clear(); routes.source_order.clear(); routes.pending_launches.clear(); routes.seen.clear();
                         }
                         if let Err(error) = hub.save_routes().await { snapshot.error = Some(error.to_string()); }
-                        snapshot.qr_status = "点击扫码连接".into();
+                        snapshot.paused = false;
+                        if snapshot.dependencies_ready {
+                            snapshot.qr_status = "正在生成二维码……".into();
+                            let (job, events) = start_qr(http.clone());
+                            qr_job = Some(job); qr_rx = events;
+                        } else {
+                            snapshot.qr_status = "准备连接".into();
+                        }
                     }
                     Command::Pair => { if credentials.is_some() { pairing = Some(new_pairing()); } }
                     Command::Save(value) => {
-                        if value.default_directory.as_ref().is_some_and(|p| !p.is_dir()) {
-                            snapshot.error = Some("默认目录不存在，请重新选择".into());
-                        } else if let Err(error) = store.save("config.json", &value) {
+                        if let Err(error) = store.save("config.json", &value) {
                             snapshot.error = Some(error.to_string());
                         } else {
                             let paths_changed = { let old = config.read().await; old.pi_path != value.pi_path || old.core_path != value.core_path };

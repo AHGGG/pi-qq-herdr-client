@@ -9,7 +9,6 @@ pub const CREATE_BOT_URL: &str = "https://bot.q.qq.com/wiki/agent-qqbot/#快速�
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    pub default_directory: Option<PathBuf>,
     pub pi_path: Option<PathBuf>,
     pub core_path: Option<PathBuf>,
     pub start_at_login: bool,

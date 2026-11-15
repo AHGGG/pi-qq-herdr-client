@@ -3,7 +3,7 @@
 <g clip-path="url(#tile)">
 <rect x="4" y="4" width="248" height="248" rx="56" fill="#EDBA91"/>
 <path d="M112 252 C109 204 125 158 171 139 C200 126 231 128 252 144 L252 252 Z" fill="#D79974" stroke="none" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>
-<path d="M59 49 C61 60 66 65 77 67 C66 69 61 74 59 85 C57 74 52 69 41 67 C52 65 57 60 59 49 Z" fill="#FFF9F4" stroke="none" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M59 41.8 C61.8 57.2 68.8 64.2 84.2 67 C68.8 69.8 61.8 76.8 59 92.2 C56.2 76.8 49.2 69.8 33.8 67 C49.2 64.2 56.2 57.2 59 41.8 Z" fill="#FFF9F4" stroke="none" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>
 <path d="M88.15 86.7 C89.6 69.3 105.55 60.6 124.4 63.5 L265.05 83.8 C285.35 86.7 294.05 104.1 291.15 124.4 L272.3 273.75 L69.3 270.85 Z" fill="#E9F5E4" stroke="#FFFDFC" stroke-width="15.225" stroke-linecap="round" stroke-linejoin="round"/>
 <path d="M88.15 86.7 C89.6 69.3 105.55 60.6 124.4 63.5 L265.05 83.8 C285.35 86.7 294.05 104.1 291.15 124.4 L272.3 273.75 L69.3 270.85 Z" fill="#E9F5E4" stroke="#38364F" stroke-width="6.525" stroke-linecap="round" stroke-linejoin="round"/>
 <path d="M111.35 96.85 L259.25 115.7 L247.65 211.4 L98.3 192.55 Z" fill="#47615F" stroke="#38364F" stroke-width="4.35" stroke-linecap="round" stroke-linejoin="round"/>

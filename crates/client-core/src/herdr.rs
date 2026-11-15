@@ -90,7 +90,7 @@ impl Core {
         source: Option<&Session>,
     ) -> Result<(String, u32)> {
         if !std::path::Path::new(cwd).is_dir() {
-            bail!("工作目录无效，请在桌面设置中重新选择");
+            bail!("工作目录无效，请在 Herdr 中检查项目目录，或通过 /workspaces 重新选择工作区");
         }
         let mut labels = json!({"pi.qq-client": "1"});
         if let Some(key) = workspace {
@@ -283,25 +283,35 @@ async fn refresh(core: &Core) -> Result<()> {
                                 .is_some_and(|s| addresses.iter().any(|a| a == s)))
                 })
                 .collect();
-            let cwd = members
-                .first()
-                .and_then(|t| {
-                    t["foreground"]["cwd"]
-                        .as_str()
-                        .or_else(|| t["cwd"].as_str())
+            let cwd = space["folder"]
+                .as_str()
+                .filter(|folder| !folder.trim().is_empty())
+                .or_else(|| {
+                    members.first().and_then(|t| {
+                        t["foreground"]["cwd"]
+                            .as_str()
+                            .or_else(|| t["cwd"].as_str())
+                    })
                 })
-                .or_else(|| space["folder"].as_str())
                 .unwrap_or_default();
+            let name = ["name", "title"]
+                .into_iter()
+                .filter_map(|field| space[field].as_str())
+                .map(str::trim)
+                .find(|name| !name.is_empty() && *name != id)
+                .or_else(|| {
+                    cwd.trim_end_matches(['/', '\\'])
+                        .rsplit(['/', '\\'])
+                        .next()
+                        .filter(|name| !name.is_empty())
+                })
+                .unwrap_or("未命名工作区");
             workspaces.push(Workspace {
                 key: WorkspaceId {
                     core_id: cat.core_id.clone(),
                     id: id.into(),
                 },
-                name: space["name"]
-                    .as_str()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or(id)
-                    .into(),
+                name: name.into(),
                 cwd: cwd.into(),
                 terminals: members
                     .iter()

@@ -3,7 +3,7 @@ use crate::{
     commands,
     herdr::Core,
     media,
-    model::{Config, PendingLaunch, Session, Workspace, clean},
+    model::{PendingLaunch, Session, Workspace, clean},
     outbox::Outbox,
     qq,
 };
@@ -34,25 +34,18 @@ pub struct Router {
     pub hub: Hub,
     pub outbox: Outbox,
     pub core: Arc<RwLock<Option<Core>>>,
-    pub config: Arc<RwLock<Config>>,
     questions: HashMap<String, Interaction>,
     permissions: HashMap<String, Interaction>,
     closes: HashMap<String, Close>,
     reply_source: Option<String>,
 }
 impl Router {
-    pub fn new(
-        hub: Hub,
-        outbox: Outbox,
-        core: Arc<RwLock<Option<Core>>>,
-        config: Arc<RwLock<Config>>,
-    ) -> Self {
+    pub fn new(hub: Hub, outbox: Outbox, core: Arc<RwLock<Option<Core>>>) -> Self {
         Self {
             expected_scope: None,
             hub,
             outbox,
             core,
-            config,
             questions: HashMap::new(),
             permissions: HashMap::new(),
             closes: HashMap::new(),
@@ -268,21 +261,26 @@ impl Router {
                 let all = self.workspaces().await?;
                 let (page, pages, start) = page(&args, all.len(), 8)?;
                 let selected = self.hub.routes.lock().await.workspace.clone();
-                let mut lines = vec![format!("工作区 · {page}/{pages}")];
+                let sessions = self.hub.sessions().await;
+                let mut lines = vec![list_heading("工作区", all.len(), page, pages)];
                 for (slot, w) in all.iter().skip(start).take(8) {
-                    lines.push(format!(
-                        "{}{}\n{}",
-                        if selected.as_ref() == Some(&w.key) {
-                            "✓ "
-                        } else {
-                            ""
-                        },
-                        command_link(&format!("/workspace {slot}"), &w.name),
-                        clean(&w.cwd, 300)
+                    let count = sessions
+                        .iter()
+                        .filter(|s| {
+                            s.terminal
+                                .as_ref()
+                                .is_some_and(|terminal| w.terminals.contains(terminal))
+                        })
+                        .count();
+                    lines.push(selection_row(
+                        &w.name,
+                        &format!("/workspace {slot}"),
+                        selected.as_ref() == Some(&w.key),
+                        &format!("{count} 个 Pi"),
                     ));
                 }
                 if all.is_empty() {
-                    lines.push("暂无 Herdr 工作区。可直接 /new，在默认目录创建 Pi。".into());
+                    lines.push("暂无 Herdr 工作区。可在 Herdr 中创建，或直接 /new，在用户主目录启动第一个 Pi。".into());
                 }
                 let mut buttons = pages_buttons("/workspaces", page, pages);
                 buttons.push(("全部 Pi", "/sessions all".into()));
@@ -348,18 +346,13 @@ impl Router {
                     }
                 }
                 let (page, pages, start) = page(page_arg, sessions.len(), 8)?;
-                let mut lines = vec![format!("Pi 会话 · {page}/{pages}")];
+                let mut lines = vec![list_heading("Pi 会话", sessions.len(), page, pages)];
                 for s in sessions.iter().skip(start).take(8) {
-                    lines.push(format!(
-                        "{}{}\n{} · {}",
-                        if selected.as_ref() == Some(&s.id) {
-                            "✓ "
-                        } else {
-                            ""
-                        },
-                        command_link(&format!("/use {}", s.slot), &s.label),
+                    lines.push(selection_row(
+                        &s.label,
+                        &format!("/use {}", s.slot),
+                        selected.as_ref() == Some(&s.id),
                         state_name(&s.state),
-                        clean(&s.cwd, 200)
                     ));
                 }
                 if sessions.is_empty() {
@@ -401,7 +394,6 @@ impl Router {
             }
             "new" => {
                 let core = self.core().await?;
-                let config = self.config.read().await.clone();
                 let source = if args.is_empty() {
                     None
                 } else {
@@ -415,26 +407,59 @@ impl Router {
                     .expected_scope
                     .clone()
                     .context("QQ 消息缺少绑定来源，新建未执行")?;
-                let key = self.hub.routes.lock().await.workspace.clone();
-                let cwd = if let Some(key) = &key {
-                    core.catalog
-                        .read()
-                        .await
-                        .workspaces
-                        .iter()
-                        .find(|w| &w.key == key)
-                        .context("工作区已不可用，请重新选择")?
-                        .cwd
-                        .clone()
+                let selected = self.hub.routes.lock().await.workspace.clone();
+                let workspaces = self.workspaces().await?;
+                let workspace = if let Some(key) = selected {
+                    Some(
+                        workspaces
+                            .iter()
+                            .find(|(_, w)| w.key == key)
+                            .context("工作区已不可用，请通过 /workspaces 重新选择")?
+                            .1
+                            .clone(),
+                    )
                 } else if let Some(source) = source.as_ref() {
-                    source.cwd.clone()
+                    workspaces
+                        .iter()
+                        .find(|(_, w)| {
+                            source
+                                .terminal
+                                .as_ref()
+                                .is_some_and(|terminal| w.terminals.contains(terminal))
+                        })
+                        .map(|(_, w)| w.clone())
+                } else if workspaces.len() == 1 {
+                    Some(workspaces[0].1.clone())
+                } else if workspaces.len() > 1 {
+                    let mut lines = vec!["请选择新 Pi 的工作区，选好后点击“新建 Pi”：".into()];
+                    for (slot, workspace) in workspaces.iter().take(8) {
+                        lines.push(selection_row(
+                            &workspace.name,
+                            &format!("/workspace {slot}"),
+                            false,
+                            "",
+                        ));
+                    }
+                    return self
+                        .send(
+                            &lines.join("\n\n"),
+                            None,
+                            &[("全部工作区", "/workspaces".into())],
+                        )
+                        .await;
                 } else {
-                    config
-                        .default_directory
-                        .unwrap_or_else(|| core.environment.home.clone())
-                        .to_string_lossy()
-                        .to_string()
+                    None
                 };
+                let key = workspace.as_ref().map(|w| w.key.clone());
+                let cwd = workspace
+                    .as_ref()
+                    .map(|w| w.cwd.clone())
+                    .or_else(|| source.as_ref().map(|s| s.cwd.clone()))
+                    .unwrap_or_else(|| core.environment.home.to_string_lossy().into_owned());
+                if let Some(key) = &key {
+                    self.hub.routes.lock().await.workspace = Some(key.clone());
+                    self.hub.save_routes().await?;
+                }
                 let (terminal, pid) = core.launch(&cwd, key.as_ref(), source.as_ref()).await?;
                 let core_id = core.catalog.read().await.core_id.clone();
                 {
@@ -1182,8 +1207,36 @@ fn markdown_text(text: &str) -> String {
     }
     result
 }
+fn list_heading(title: &str, count: usize, page: usize, pages: usize) -> String {
+    if pages > 1 {
+        format!("{title} · {count} 个 · {page}/{pages}")
+    } else {
+        format!("{title} · {count} 个")
+    }
+}
+fn selection_row(name: &str, command: &str, selected: bool, detail: &str) -> String {
+    let title = clean(name, 120)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "{}**{}**\n{}{}",
+        if selected { "✓ " } else { "" },
+        markdown_text(&title),
+        command_link(command, ""),
+        if detail.is_empty() {
+            String::new()
+        } else {
+            format!(" · {}", markdown_text(detail))
+        }
+    )
+}
 fn command_link(command: &str, label: &str) -> String {
-    let text = format!("{command} · {}", clean(label, 65));
+    let text = if label.is_empty() {
+        command.to_string()
+    } else {
+        format!("{command} · {}", clean(label, 65))
+    };
     format!(
         "<qqbot-cmd-enter text=\"{}\" />",
         url::form_urlencoded::byte_serialize(text.as_bytes()).collect::<String>()

@@ -453,12 +453,6 @@ impl ClientWindow {
                     )
                     .into_any_element();
             }
-            let guide_text = match self.snapshot.guide_status {
-                GuideStatus::NotSent => "即将向机器人私聊发送入门指南。",
-                GuideStatus::Sending => "正在向机器人私聊发送入门指南……",
-                GuideStatus::Sent => "入门指南已发出，请查看机器人私聊。",
-                GuideStatus::Failed => "主动发送未成功。你仍可在机器人私聊发送 /help 开始。",
-            };
             return div()
                 .flex()
                 .flex_col()
@@ -500,46 +494,14 @@ impl ClientWindow {
                 .child(
                     Button::new("send-guide")
                         .primary()
-                        .label(if self.snapshot.guide_status == GuideStatus::Sent {
-                            "重新发送入门指南到 QQ"
-                        } else {
-                            "发送入门指南到 QQ"
+                        .label(match self.snapshot.guide_status {
+                            GuideStatus::NotSent => "发送入门指南到 QQ",
+                            GuideStatus::Sending => "正在发送入门指南……",
+                            GuideStatus::Sent => "重新发送入门指南到 QQ",
+                            GuideStatus::Failed => "发送未成功，点击重试",
                         })
                         .disabled(self.snapshot.guide_status == GuideStatus::Sending)
                         .on_click(cx.listener(|this, _, _, cx| this.send(Command::SendGuide, cx))),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .when(self.snapshot.guide_status == GuideStatus::Sending, |el| {
-                            el.child(Spinner::new().small())
-                        })
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(guide_text),
-                        ),
-                )
-                .when(self.snapshot.connected_sessions == 0, |el| {
-                    el.child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("已有 Pi 未出现？在该 Pi 中空闲时 /reload，无需重新扫码。"),
-                    )
-                })
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(if self.tray.is_some() {
-                            "关闭窗口后会驻留托盘，请保持客户端运行。"
-                        } else {
-                            "托盘不可用，请保持此窗口打开。"
-                        }),
                 )
                 .into_any_element();
         }

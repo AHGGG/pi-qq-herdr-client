@@ -2,7 +2,7 @@ use crate::{
     bridge::{BridgeEvent, Hub},
     herdr::Core,
     install,
-    model::{Command, Config, Credentials, Snapshot},
+    model::{Command, Config, Credentials, GuideStatus, Snapshot},
     outbox::{Accepted, Binding, Outbox},
     qq::{self, Api, BindResult, BindTask, GatewayEvent},
     router::Router,
@@ -210,6 +210,12 @@ async fn run(
                             });
                         } else { snapshot.error = Some("请先完成 QQ 连接和配对。".into()); }
                     }
+                    Command::SendGuide => {
+                        match send_guide(&outbox, true).await {
+                            Ok(()) => snapshot.error = None,
+                            Err(error) => snapshot.error = Some(error.to_string()),
+                        }
+                    }
                     Command::RetryDeliveries => {
                         match outbox.retry().await {
                             Ok(()) => snapshot.notice = Some("已重新排队发送失败的消息。".into()),
@@ -265,7 +271,6 @@ async fn run(
                                 else {
                                     binding_tx.send_replace(Some(Binding { api: Api::new(http.clone(), creds.clone()), owner: sender.into(), app_id: creds.app_id.clone(), ready: snapshot.qq_ready }));
                                     pairing = None;
-                                    if let Err(error) = outbox.enqueue(None, "已与这台电脑配对。发送 /help 查看用法；没有 Pi 时可直接 /new。", None, None, false, None).await { snapshot.error = Some(error.to_string()); }
                                 }
                             }
                         } else if credentials.as_ref().and_then(|c| c.owner.as_deref()) == Some(sender) {
@@ -303,6 +308,16 @@ async fn run(
             }
         }
         snapshot.owner_bound = credentials.as_ref().is_some_and(|c| c.owner.is_some());
+        snapshot.guide_status = outbox.guide_status().await;
+        if snapshot.qq_ready
+            && snapshot.owner_bound
+            && snapshot.guide_status == GuideStatus::NotSent
+        {
+            if let Err(error) = send_guide(&outbox, false).await {
+                snapshot.error = Some(error.to_string());
+            }
+            snapshot.guide_status = outbox.guide_status().await;
+        }
         snapshot.pair_code = pairing.as_ref().map(|(code, _)| code.clone());
         let _ = snapshots.try_send(snapshot.clone());
     }
@@ -314,6 +329,18 @@ async fn run(
     }
     let _ = std::fs::remove_file(store.root().join("bridge.json"));
     Ok(())
+}
+
+async fn send_guide(outbox: &Outbox, resend: bool) -> Result<()> {
+    outbox.welcome(
+        "Pi QQ 已连接\n\n你已与这台电脑连接，接下来就在这个机器人私聊中操作：\n\n已有 Pi：发送 /sessions，选择会话后直接发消息。\n新建 Pi：发送 /new，等创建成功后再发送任务。\n全部用法：发送 /help。\n\n电脑上的 Pi QQ 客户端需要保持运行。关闭窗口会驻留托盘，选择退出才会断开连接。",
+        crate::router::keyboard(&[
+            ("已有 Pi", "/sessions".into()),
+            ("新建 Pi", "/new".into()),
+            ("查看帮助", "/help".into()),
+        ]),
+        resend,
+    ).await
 }
 
 fn new_pairing() -> (String, Instant) {
@@ -337,9 +364,7 @@ async fn detect(
                 snapshot.missing = None;
                 snapshot.dependencies_ready = true;
                 if changed {
-                    snapshot.notice = Some(
-                        "配套扩展已安装。已有 Pi 请在空闲时 /reload，新 Pi 会自动加载。".into(),
-                    );
+                    snapshot.notice = Some("配套扩展已安装。".into());
                 }
                 if core.read().await.is_none() {
                     *core.write().await = Some(Core::start(env));

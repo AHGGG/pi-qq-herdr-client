@@ -51,7 +51,13 @@ impl Store {
             .open(self.root.join("instance.lock"))?;
         match f.try_lock_exclusive() {
             Ok(()) => Ok(Some(InstanceLock { _file: f })),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+            // Windows reports ERROR_LOCK_VIOLATION (33), rather than WouldBlock.
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
+            {
+                Ok(None)
+            }
             Err(e) => Err(e.into()),
         }
     }

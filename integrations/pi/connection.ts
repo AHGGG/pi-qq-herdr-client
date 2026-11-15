@@ -55,7 +55,7 @@ export class SessionConnection {
         this.pending.clear();
         if (!this.closed) { this.onState('disconnected'); this.schedule(); }
       });
-    } catch { this.schedule(); }
+    } catch { if (!this.closed) this.onState('disconnected'); this.schedule(); }
   }
   schedule() {
     if (this.closed) return;

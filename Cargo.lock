@@ -5203,6 +5203,7 @@ name = "pi-qq-herdr-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "embed-resource",
  "gpui-kit",
  "image",
  "open",

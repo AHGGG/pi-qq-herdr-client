@@ -1,6 +1,46 @@
 use anyhow::Result;
 use gpui_kit::{App, Window};
 
+pub fn set_window_icon(window: &mut Window) {
+    #[cfg(windows)]
+    {
+        use raw_window_handle::HasWindowHandle;
+        use windows_sys::Win32::{
+            System::LibraryLoader::GetModuleHandleW,
+            UI::WindowsAndMessaging::{
+                ICON_BIG, ICON_SMALL, IMAGE_ICON, LR_SHARED, LoadImageW, SendMessageW, WM_SETICON,
+            },
+        };
+        if let Ok(handle) = window.window_handle() {
+            if let raw_window_handle::RawWindowHandle::Win32(handle) = handle.as_raw() {
+                unsafe {
+                    let module = GetModuleHandleW(std::ptr::null());
+                    for (kind, size) in [(ICON_SMALL, 16), (ICON_BIG, 32)] {
+                        let icon = LoadImageW(
+                            module,
+                            1usize as *const u16,
+                            IMAGE_ICON,
+                            size,
+                            size,
+                            LR_SHARED,
+                        );
+                        if !icon.is_null() {
+                            SendMessageW(
+                                handle.hwnd.get() as *mut _,
+                                WM_SETICON,
+                                kind as usize,
+                                icon as isize,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = window;
+}
+
 pub fn hide(window: &mut Window, cx: &mut App) {
     #[cfg(windows)]
     {

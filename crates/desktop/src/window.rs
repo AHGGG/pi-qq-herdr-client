@@ -1,17 +1,19 @@
 use crate::platform;
 use gpui_kit::{
+    base::Disableable,
     component::{
         ActiveTheme, Sizable, StyledExt,
         button::{Button, ButtonVariants},
         checkbox::Checkbox,
         input::{Input, InputState},
+        spinner::Spinner,
     },
     prelude::FluentBuilder as _,
     *,
 };
 use pi_qq_client_core::{
     Client, Command, Config, Snapshot,
-    model::{CREATE_BOT_URL, Dependency, HERDR_URL, PI_URL},
+    model::{CREATE_BOT_URL, Dependency, GuideStatus, HERDR_URL, PI_URL},
 };
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tray_icon::{
@@ -52,19 +54,12 @@ impl ClientWindow {
         let settings = MenuItem::new("设置", true, None);
         let quit = MenuItem::new("退出", true, None);
         let _ = menu.append_items(&[&open, &settings, &quit]);
-        let mut rgba = vec![0u8; 32 * 32 * 4];
-        for y in 0..32 {
-            for x in 0..32 {
-                let i = (y * 32 + x) * 4;
-                let on = (7..25).contains(&x) && (7..25).contains(&y);
-                rgba[i..i + 4].copy_from_slice(if on {
-                    &[255, 255, 255, 255]
-                } else {
-                    &[35, 89, 78, 255]
-                });
-            }
-        }
-        let icon = tray_icon::Icon::from_rgba(rgba, 32, 32).expect("tray icon");
+        platform::set_window_icon(window);
+        let image = image::load_from_memory(include_bytes!("../assets/pi-qq.png"))
+            .expect("embedded application icon")
+            .resize_exact(32, 32, image::imageops::FilterType::Nearest)
+            .into_rgba8();
+        let icon = tray_icon::Icon::from_rgba(image.into_raw(), 32, 32).expect("tray icon");
         let tray = TrayIconBuilder::new()
             .with_tooltip("Pi QQ")
             .with_menu(Box::new(menu))
@@ -382,6 +377,7 @@ impl ClientWindow {
                 .flex_col()
                 .gap_5()
                 .py_8()
+                .child(Spinner::new().small())
                 .child("正在检查运行环境；如有问题，处理提示后重新检测。")
                 .child(
                     Button::new("retry-dependencies")
@@ -433,34 +429,116 @@ impl ClientWindow {
                 .into_any_element();
         }
         if self.snapshot.qq_ready || self.snapshot.owner_bound {
+            if !self.snapshot.qq_ready || !self.snapshot.core_ready {
+                return div()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .py_8()
+                    .child(Spinner::new().small())
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_semibold()
+                            .child(if self.snapshot.qq_ready {
+                                "QQ 已连接，正在连接 Herdr……"
+                            } else {
+                                "QQ 正在重连……"
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .child("连接恢复后，可继续在手机 QQ 中使用 Pi，无需重新扫码。"),
+                    )
+                    .into_any_element();
+            }
+            let guide_text = match self.snapshot.guide_status {
+                GuideStatus::NotSent => "即将向机器人私聊发送入门指南。",
+                GuideStatus::Sending => "正在向机器人私聊发送入门指南……",
+                GuideStatus::Sent => "入门指南已发出，请查看机器人私聊。",
+                GuideStatus::Failed => "主动发送未成功。你仍可在机器人私聊发送 /help 开始。",
+            };
             return div()
                 .flex()
                 .flex_col()
-                .gap_5()
-                .py_12()
+                .gap_4()
+                .py_4()
                 .child(
                     div()
                         .text_lg()
                         .font_semibold()
-                        .child(if self.snapshot.qq_ready {
-                            "QQ 已连接"
-                        } else {
-                            "QQ 正在重连……"
-                        }),
+                        .child("已连接，去 QQ 开始使用"),
                 )
-                .child(div().text_base().child(if self.snapshot.core_ready {
-                    "Herdr 已就绪"
-                } else {
-                    "Herdr 正在连接……"
-                }))
                 .child(
                     div()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
-                        .child(if self.snapshot.qq_ready && self.snapshot.core_ready {
-                            "可以在手机 QQ 中创建和使用 Pi。"
+                        .child(format!(
+                            "QQ、Herdr 已就绪 · 已连接 {} 个 Pi 会话",
+                            self.snapshot.connected_sessions
+                        )),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .child("打开手机 QQ 中刚才授权的机器人私聊："),
+                )
+                .child(guide_step(
+                    "已有 Pi",
+                    "/sessions",
+                    "选择一个会话，再直接发送任务。",
+                    cx,
+                ))
+                .child(guide_step(
+                    "新建 Pi",
+                    "/new",
+                    "等创建成功后，再直接发送任务。",
+                    cx,
+                ))
+                .child(div().text_sm().child("发送 /help 查看全部用法。"))
+                .child(
+                    Button::new("send-guide")
+                        .primary()
+                        .label(if self.snapshot.guide_status == GuideStatus::Sent {
+                            "重新发送入门指南到 QQ"
                         } else {
-                            "连接恢复后，可继续在手机 QQ 中使用 Pi。"
+                            "发送入门指南到 QQ"
+                        })
+                        .disabled(self.snapshot.guide_status == GuideStatus::Sending)
+                        .on_click(cx.listener(|this, _, _, cx| this.send(Command::SendGuide, cx))),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .when(self.snapshot.guide_status == GuideStatus::Sending, |el| {
+                            el.child(Spinner::new().small())
+                        })
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(guide_text),
+                        ),
+                )
+                .when(self.snapshot.connected_sessions == 0, |el| {
+                    el.child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("已有 Pi 未出现？在该 Pi 中空闲时 /reload，无需重新扫码。"),
+                    )
+                })
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(if self.tray.is_some() {
+                            "关闭窗口后会驻留托盘，请保持客户端运行。"
+                        } else {
+                            "托盘不可用，请保持此窗口打开。"
                         }),
                 )
                 .into_any_element();
@@ -513,7 +591,27 @@ impl ClientWindow {
 }
 impl Render for ClientWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let phase: u64 = if self.settings {
+            0
+        } else if self.snapshot.missing.is_some() {
+            1
+        } else if !self.snapshot.dependencies_ready {
+            2
+        } else if self.snapshot.pair_code.is_some() {
+            3
+        } else if self.snapshot.qq_ready && self.snapshot.owner_bound && self.snapshot.core_ready {
+            4
+        } else if self.snapshot.qq_ready || self.snapshot.owner_bound {
+            5
+        } else {
+            6
+        };
         let body = self.body(window, cx);
+        let body = div().child(body).with_animation(
+            ("page-entry", phase),
+            Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()),
+            |element, progress| element.opacity(progress),
+        );
         div()
             .id("client-window")
             .size_full()
@@ -558,6 +656,37 @@ impl Render for ClientWindow {
             })
     }
 }
+fn guide_step(title: &str, command: &str, detail: &str, cx: &App) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .p_3()
+        .rounded_lg()
+        .bg(cx.theme().muted)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(div().text_sm().child(title.to_string()))
+                .child(
+                    div()
+                        .text_base()
+                        .font_semibold()
+                        .text_color(cx.theme().primary)
+                        .child(command.to_string()),
+                ),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(detail.to_string()),
+        )
+        .into_any_element()
+}
+
 fn path_text(path: &Option<PathBuf>) -> String {
     path.as_ref()
         .map(|p| p.to_string_lossy().to_string())

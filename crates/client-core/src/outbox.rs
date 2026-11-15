@@ -1,5 +1,6 @@
 use crate::{
     media::{self, Attachment},
+    model::GuideStatus,
     qq::{Api, reference_keys},
     store::Store,
 };
@@ -30,6 +31,13 @@ impl Binding {
 struct Saved {
     pending: Vec<Record>,
     receipts: Vec<Value>,
+    welcome: Option<Welcome>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+struct Welcome {
+    scope: String,
+    delivery_id: String,
+    accepted: bool,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Record {
@@ -122,6 +130,87 @@ impl Outbox {
         self.notify.notify_one();
         Ok(json!({"deliveryId":id,"state":"queued"}))
     }
+    pub async fn welcome(&self, text: &str, keyboard: Option<Value>, resend: bool) -> Result<()> {
+        let binding = self
+            .binding
+            .borrow()
+            .clone()
+            .filter(|b| b.ready)
+            .context("请先完成 QQ 连接和用户配对")?;
+        let scope = binding.scope();
+        let mut state = self.saved.lock().await;
+        if let Some(welcome) = state.welcome.as_ref().filter(|w| w.scope == scope) {
+            if !resend {
+                return Ok(());
+            }
+            let id = welcome.delivery_id.clone();
+            if let Some(record) = state.pending.iter_mut().find(|r| r.id == id) {
+                record.failed = false;
+                record.attempts = 0;
+                record.next_attempt = 0;
+                record.error = None;
+                self.store.save("outbox.json", &*state)?;
+                self.notify.notify_one();
+                return Ok(());
+            }
+        }
+        if state.pending.len() >= 100 {
+            bail!("待发队列已满，请在设置中检查发送状态");
+        }
+        let id = Uuid::new_v4().to_string();
+        state.pending.push(Record {
+            id: id.clone(),
+            scope: scope.clone(),
+            owner: binding.owner,
+            source: None,
+            parts: text_parts(text),
+            cursor: 0,
+            attachment: None,
+            keyboard,
+            markdown: true,
+            attempts: 0,
+            next_attempt: 0,
+            failed: false,
+            error: None,
+        });
+        let previous = state.welcome.replace(Welcome {
+            scope,
+            delivery_id: id,
+            accepted: false,
+        });
+        if let Err(error) = self.store.save("outbox.json", &*state) {
+            state.pending.pop();
+            state.welcome = previous;
+            return Err(error);
+        }
+        self.notify.notify_one();
+        Ok(())
+    }
+    pub async fn guide_status(&self) -> GuideStatus {
+        let Some(binding) = self.binding.borrow().clone() else {
+            return GuideStatus::NotSent;
+        };
+        let state = self.saved.lock().await;
+        let Some(welcome) = state
+            .welcome
+            .as_ref()
+            .filter(|w| w.scope == binding.scope())
+        else {
+            return GuideStatus::NotSent;
+        };
+        if welcome.accepted {
+            return GuideStatus::Sent;
+        }
+        if state
+            .pending
+            .iter()
+            .any(|r| r.id == welcome.delivery_id && r.failed)
+        {
+            GuideStatus::Failed
+        } else {
+            GuideStatus::Sending
+        }
+    }
     pub async fn retry(&self) -> Result<()> {
         let mut state = self.saved.lock().await;
         for record in &mut state.pending {
@@ -191,6 +280,13 @@ impl Outbox {
                                 >= current.parts.len() + usize::from(current.attachment.is_some())
                             {
                                 state.pending.remove(index);
+                                if let Some(welcome) = state
+                                    .welcome
+                                    .as_mut()
+                                    .filter(|w| w.delivery_id == record.id)
+                                {
+                                    welcome.accepted = true;
+                                }
                                 state.receipts.push(json!({"deliveryId":record.id,"state":"sent","sentAt":now(),"scope":record.scope,"source":record.source,"references":references}));
                                 if state.receipts.len() > 100 {
                                     state.receipts.remove(0);

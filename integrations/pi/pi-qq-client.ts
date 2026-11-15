@@ -27,6 +27,7 @@ export default function qqRemote(pi) {
   let completedDelivery;
   let hadWork = false;
   let muted = false;
+  let disconnectedWarningShown = false;
   let forwardingGeneration = 0;
   let customName = '';
   let subscriptions = [];
@@ -97,8 +98,13 @@ export default function qqRemote(pi) {
 
   function fireNotice(text) {
     return notify(text).then(() => true, (error) => {
-      pi.appendEntry('qq-remote-unsent', { text, error: error.message, timestamp: Date.now() });
-      report(`QQ notification was not queued: ${error.message}. Retry with the qq-remote skill.`, 'warning');
+      pi.appendEntry('pi-qq-client-unsent', { text, error: error.message, timestamp: Date.now() });
+      if (connection?.slot) {
+        report(`QQ 通知未入队：${error.message}。请查看 Pi QQ 客户端的连接状态；此条消息仍可在终端查看。`, 'warning');
+      } else if (!disconnectedWarningShown) {
+        disconnectedWarningShown = true;
+        report('QQ 通知未入队：请打开并保持 Pi QQ 桌面客户端运行，扩展会自动重连。此条消息尚未发送，请在终端查看。', 'warning');
+      }
       return false;
     });
   }
@@ -199,8 +205,9 @@ export default function qqRemote(pi) {
       },
       onState: (state, registration) => {
         if (ownGeneration !== generation) return;
-        if (ctx.hasUI) ctx.ui.setStatus('qq-remote', state === 'connected' ? `QQ ${current.slot}` : 'QQ disconnected');
+        if (ctx.hasUI) ctx.ui.setStatus('pi-qq-client', state === 'connected' ? `Pi QQ ${current.slot}` : 'Pi QQ 等待桌面客户端');
         if (state === 'connected') {
+          disconnectedWarningShown = false;
           if (registration?.name) applySessionName(registration.name);
           syncState();
           for (const payload of questions.values()) current.send({ type: 'question_open', ...payload });
@@ -241,7 +248,7 @@ export default function qqRemote(pi) {
     for (const pending of answers.values()) { clearTimeout(pending.timer); pending.reject(new Error('The session is closed.')); }
     answers.clear();
     questions.clear();
-    if (ctx?.hasUI) ctx.ui.setStatus('qq-remote', undefined);
+    if (ctx?.hasUI) ctx.ui.setStatus('pi-qq-client', undefined);
   }
 
   pi.on('session_start', async (_event, currentCtx) => {

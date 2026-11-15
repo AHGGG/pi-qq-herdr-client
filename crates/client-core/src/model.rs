@@ -38,8 +38,18 @@ pub struct Snapshot {
     pub qr_status: String,
     pub pair_code: Option<String>,
     pub connected_sessions: usize,
+    pub guide_status: GuideStatus,
     pub failed_deliveries: usize,
     pub show_window: u64,
+}
+
+#[derive(Clone, Default, PartialEq, Eq)]
+pub enum GuideStatus {
+    #[default]
+    NotSent,
+    Sending,
+    Sent,
+    Failed,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -56,6 +66,7 @@ pub enum Command {
     Pair,
     Save(Config),
     RetryDeliveries,
+    SendGuide,
     ConfigureMenu,
     Shutdown,
 }

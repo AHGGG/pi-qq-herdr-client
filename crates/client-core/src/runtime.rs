@@ -146,10 +146,45 @@ async fn run(
                 let Some(command) = command else { break; };
                 match command {
                     Command::Shutdown => break,
+                    Command::SetPaused(paused) => {
+                        if snapshot.paused == paused { continue; }
+                        snapshot.paused = paused;
+                        snapshot.error = None;
+                        if paused {
+                            if let Some(job) = gateway.take() { job.abort(); }
+                            if let Some(job) = qr_job.take() { job.abort(); }
+                            if menu_job.as_ref().is_some_and(|(_, job)| !job.is_finished()) {
+                                if let Some((_, job)) = menu_job.take() { job.abort(); }
+                            }
+                            snapshot.qq_ready = false;
+                            snapshot.qr_url = None;
+                            snapshot.qr_status = "连接已暂停".into();
+                            let binding = binding_tx.borrow().clone();
+                            if let Some(mut binding) = binding {
+                                binding.ready = false;
+                                binding_tx.send_replace(Some(binding));
+                            }
+                        } else {
+                            snapshot.qr_status = "准备连接".into();
+                            if !snapshot.dependencies_ready {
+                                detect(&config, &core, &mut snapshot).await;
+                            }
+                            if snapshot.dependencies_ready {
+                                if let Some(creds) = credentials.as_ref() {
+                                    let (job, events) = connect(&http, creds, &binding_tx);
+                                    gateway = Some(job); gateway_rx = events;
+                                    if creds.owner.is_none() { pairing = Some(new_pairing()); }
+                                } else {
+                                    let (job, events) = start_qr(http.clone());
+                                    qr_job = Some(job); qr_rx = events;
+                                }
+                            }
+                        }
+                    }
                     Command::Detect => {
                         snapshot.error = None;
                         detect(&config, &core, &mut snapshot).await;
-                        if snapshot.dependencies_ready && gateway.is_none() {
+                        if !snapshot.paused && snapshot.dependencies_ready && gateway.is_none() {
                             if let Some(creds) = credentials.as_ref() {
                                 let (job, events) = connect(&http, creds, &binding_tx);
                                 gateway = Some(job); gateway_rx = events;
@@ -160,6 +195,10 @@ async fn run(
                         }
                     }
                     Command::StartQr => {
+                        if snapshot.paused {
+                            snapshot.error = Some("连接已暂停，请先启动连接。".into());
+                            continue;
+                        }
                         if credentials.is_some() {
                             snapshot.error = Some("已有 QQ 授权，正在自动重连。若要更换机器人，请在设置中选择重新绑定。".into());
                             continue;

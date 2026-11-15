@@ -29,6 +29,7 @@ pub struct Snapshot {
     pub core_ready: bool,
     pub core_error: Option<String>,
     pub qq_ready: bool,
+    pub paused: bool,
     pub owner_bound: bool,
     pub dependencies_ready: bool,
     pub missing: Option<Dependency>,
@@ -69,6 +70,7 @@ pub enum Command {
     RetryDeliveries,
     SendGuide,
     ConfigureMenu,
+    SetPaused(bool),
     Shutdown,
 }
 

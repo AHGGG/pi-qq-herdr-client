@@ -11,14 +11,16 @@ use gpui_kit::{
 };
 use pi_qq_client_core::{Command, store::Store};
 
+const APP_NAME: &str = "Pi QQ Herdr Client";
+
 fn main() {
     if let Err(error) = launch() {
-        eprintln!("Pi QQ: {error}");
+        eprintln!("{APP_NAME}: {error}");
         // A packaged window-only build must still surface initialization failures.
         #[cfg(windows)]
         {
             let _ = rfd::MessageDialog::new()
-                .set_title("Pi QQ")
+                .set_title(APP_NAME)
                 .set_description(error.to_string())
                 .set_level(rfd::MessageLevel::Error)
                 .show();
@@ -50,7 +52,7 @@ fn launch() -> anyhow::Result<()> {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(400.), px(540.))),
                     titlebar: Some(TitlebarOptions {
-                        title: Some("Pi QQ".into()),
+                        title: Some(APP_NAME.into()),
                         ..Default::default()
                     }),
                     ..Default::default()
@@ -60,7 +62,7 @@ fn launch() -> anyhow::Result<()> {
                     cx.new(|cx| window::ClientWindow::new(client, background, window, cx))
                 },
             )
-            .expect("无法打开 Pi QQ 窗口");
+            .expect("无法打开客户端窗口");
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     cx.quit();

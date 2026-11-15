@@ -1,8 +1,8 @@
-use crate::platform;
+use crate::{APP_NAME, platform};
 use gpui_kit::{
     base::Disableable,
     component::{
-        ActiveTheme, Sizable, StyledExt,
+        ActiveTheme, Icon, IconName, Sizable, StyledExt,
         button::{Button, ButtonVariants},
         checkbox::Checkbox,
         input::{Input, InputState},
@@ -17,7 +17,7 @@ use pi_qq_client_core::{
 };
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tray_icon::{
-    TrayIcon, TrayIconBuilder, TrayIconEvent,
+    MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
     menu::{Menu, MenuEvent, MenuId, MenuItem},
 };
 
@@ -34,6 +34,7 @@ pub struct ClientWindow {
     qr_url: Option<String>,
     qr: Option<Arc<Image>>,
     tray: Option<TrayIcon>,
+    connection_item: MenuItem,
     open_id: MenuId,
     settings_id: MenuId,
     quit_id: MenuId,
@@ -50,10 +51,11 @@ impl ClientWindow {
         let pi_path = cx.new(|cx| InputState::new(window, cx).placeholder("自动检测"));
         let core_path = cx.new(|cx| InputState::new(window, cx).placeholder("自动检测"));
         let menu = Menu::new();
-        let open = MenuItem::new("打开窗口", true, None);
+        let open = MenuItem::new("打开主页面", true, None);
+        let connection = MenuItem::new("暂停连接", true, None);
         let settings = MenuItem::new("设置", true, None);
         let quit = MenuItem::new("退出", true, None);
-        let _ = menu.append_items(&[&open, &settings, &quit]);
+        let _ = menu.append_items(&[&open, &connection, &settings, &quit]);
         platform::set_window_icon(window);
         let image = image::load_from_memory(include_bytes!("../assets/pi-qq.png"))
             .expect("embedded application icon")
@@ -61,8 +63,9 @@ impl ClientWindow {
             .into_rgba8();
         let icon = tray_icon::Icon::from_rgba(image.into_raw(), 32, 32).expect("tray icon");
         let tray = TrayIconBuilder::new()
-            .with_tooltip("Pi QQ")
+            .with_tooltip(APP_NAME)
             .with_menu(Box::new(menu))
+            .with_menu_on_left_click(false)
             .with_icon(icon)
             .build()
             .ok();
@@ -94,15 +97,31 @@ impl ClientWindow {
                             if event.id == this.quit_id {
                                 let _ = this.commands.send(Command::Shutdown);
                                 cx.quit();
+                            } else if &event.id == this.connection_item.id() {
+                                this.send(Command::SetPaused(!this.snapshot.paused), cx);
                             } else if event.id == this.settings_id {
                                 this.open_settings(window, cx);
                                 platform::show(window, cx);
                             } else if event.id == this.open_id {
+                                this.settings = false;
+                                this.confirm_rebind = false;
                                 platform::show(window, cx);
                             }
                         }
                         while let Ok(event) = TrayIconEvent::receiver().try_recv() {
-                            if matches!(event, TrayIconEvent::DoubleClick { .. }) {
+                            if matches!(
+                                event,
+                                TrayIconEvent::Click {
+                                    button: MouseButton::Left,
+                                    button_state: MouseButtonState::Up,
+                                    ..
+                                } | TrayIconEvent::DoubleClick {
+                                    button: MouseButton::Left,
+                                    ..
+                                }
+                            ) {
+                                this.settings = false;
+                                this.confirm_rebind = false;
                                 platform::show(window, cx);
                             }
                         }
@@ -129,6 +148,7 @@ impl ClientWindow {
             qr_url: None,
             qr: None,
             tray,
+            connection_item: connection,
             open_id: open.id().clone(),
             settings_id: settings.id().clone(),
             quit_id: quit.id().clone(),
@@ -149,6 +169,11 @@ impl ClientWindow {
                 self.error = Some("二维码无法绘制，请刷新重试。".into());
             }
         }
+        self.connection_item.set_text(if snapshot.paused {
+            "启动连接"
+        } else {
+            "暂停连接"
+        });
         self.snapshot = snapshot;
         cx.notify();
     }
@@ -355,6 +380,28 @@ impl ClientWindow {
                 )
                 .into_any_element();
         }
+        if self.snapshot.paused {
+            return div()
+                .flex()
+                .flex_col()
+                .gap_4()
+                .py_8()
+                .child(div().text_lg().font_semibold().child("连接已暂停"))
+                .child(
+                    div()
+                        .text_sm()
+                        .child("QQ 收发已暂停，Pi 与 Herdr 继续运行。"),
+                )
+                .child(
+                    Button::new("resume-connection")
+                        .primary()
+                        .label("启动连接")
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.send(Command::SetPaused(false), cx)),
+                        ),
+                )
+                .into_any_element();
+        }
         if let Some(missing) = &self.snapshot.missing {
             let (text, url) = if *missing == Dependency::Herdr {
                 (
@@ -477,12 +524,6 @@ impl ClientWindow {
                 .py_4()
                 .child(
                     div()
-                        .text_lg()
-                        .font_semibold()
-                        .child("已连接，去 QQ 开始使用"),
-                )
-                .child(
-                    div()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
                         .child(format!(
@@ -570,15 +611,22 @@ impl ClientWindow {
 }
 impl Render for ClientWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let connected = !self.snapshot.paused
+            && self.snapshot.dependencies_ready
+            && self.snapshot.qq_ready
+            && self.snapshot.owner_bound
+            && self.snapshot.core_ready;
         let phase: u64 = if self.settings {
             0
+        } else if self.snapshot.paused {
+            7
         } else if self.snapshot.missing.is_some() {
             1
         } else if !self.snapshot.dependencies_ready {
             2
         } else if self.snapshot.pair_code.is_some() {
             3
-        } else if self.snapshot.qq_ready && self.snapshot.owner_bound && self.snapshot.core_ready {
+        } else if connected {
             4
         } else if self.snapshot.qq_ready || self.snapshot.owner_bound {
             5
@@ -607,7 +655,20 @@ impl Render for ClientWindow {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(div().text_xl().font_semibold().child("Pi QQ"))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().text_xl().font_semibold().child(APP_NAME))
+                            .when(connected, |el| {
+                                el.child(
+                                    Icon::new(IconName::CircleCheck)
+                                        .small()
+                                        .text_color(cx.theme().success),
+                                )
+                            }),
+                    )
                     .when(!self.settings, |el| {
                         el.child(Button::new("settings").small().label("设置").on_click(
                             cx.listener(|this, _, window, cx| this.open_settings(window, cx)),

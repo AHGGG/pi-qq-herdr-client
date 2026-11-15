@@ -1,5 +1,6 @@
 use crate::{
     bridge::{BridgeEvent, Hub},
+    commands,
     herdr::Core,
     media,
     model::{Config, Session, Workspace, clean},
@@ -203,6 +204,11 @@ impl Router {
         };
         match command.as_str() {
             "help" => {
+                if args.eq_ignore_ascii_case("commands") {
+                    return self
+                        .send(commands::HELP, None, &[("返回帮助", "/help".into())])
+                        .await;
+                }
                 return self
                     .send(
                         HELP,
@@ -211,6 +217,7 @@ impl Router {
                             ("工作区", "/workspaces".into()),
                             ("Pi 会话", "/sessions all".into()),
                             ("新建 Pi", "/new".into()),
+                            ("手机控制用法", "/help commands".into()),
                         ],
                     )
                     .await;
@@ -502,50 +509,23 @@ impl Router {
                 Ok(())
             }
             "commands" | "model" | "thinking" | "compact" | "reload" | "pi" => {
-                let result=self.hub.action(&session,json!({"action":"command","name":command,"args":args,"token":uuid::Uuid::new_v4().to_string()})).await?;
-                let mut text = result["text"]
-                    .as_str()
-                    .unwrap_or("操作已提交，请查看 Pi 终端。")
-                    .to_string();
-                let mut buttons = Vec::new();
-                if let Some(choices) = result["choices"].as_array() {
-                    for choice in choices {
-                        let Some(value) = choice["value"].as_str() else {
-                            continue;
-                        };
-                        let cmd = match result["view"].as_str() {
-                            Some("models") => format!("/to {} /model {value}", session.slot),
-                            Some("thinking") => format!("/to {} /thinking {value}", session.slot),
-                            Some("commands") => format!("/to {} /pi {value} ", session.slot),
-                            _ => continue,
-                        };
-                        if result["view"] == "commands" {
-                            text.push_str(&format!("\n{}", input_link(&cmd, value)));
-                        } else {
-                            text.push_str(&format!(
-                                "\n<qqbot-cmd-enter text=\"{}\" />",
-                                url::form_urlencoded::byte_serialize(cmd.as_bytes())
-                                    .collect::<String>()
-                            ));
-                        }
-                    }
-                }
-                let page = result["page"].as_u64().unwrap_or(1);
-                let pages = result["pages"].as_u64().unwrap_or(1);
-                if page > 1 {
-                    buttons.push((
-                        "上一页",
-                        format!("/to {} /{} {}", session.slot, command, page - 1),
-                    ));
-                }
-                if page < pages {
-                    buttons.push((
-                        "下一页",
-                        format!("/to {} /{} {}", session.slot, command, page + 1),
-                    ));
-                }
-                buttons.extend(navigation(&session));
-                self.session_send(&session, &text, &buttons).await
+                let reply = commands::execute(&self.hub, &session, &command, &args).await?;
+                self.outbox
+                    .enqueue(
+                        self.expected_scope.as_deref(),
+                        &format!(
+                            "[{} · {}]\n{}",
+                            session.slot,
+                            markdown_text(&clean(&session.label, 100)),
+                            reply.text
+                        ),
+                        Some(&session.id),
+                        Some(reply.keyboard),
+                        true,
+                        None,
+                    )
+                    .await?;
+                Ok(())
             }
             "" | "steer" => {
                 let files = media::receive(http, message).await?;
@@ -964,13 +944,6 @@ fn command_link(command: &str, label: &str) -> String {
     format!(
         "<qqbot-cmd-enter text=\"{}\" />",
         url::form_urlencoded::byte_serialize(text.as_bytes()).collect::<String>()
-    )
-}
-fn input_link(command: &str, label: &str) -> String {
-    format!(
-        "<qqbot-cmd-input text=\"{}\" show=\"{}\" reference=\"false\" />",
-        url::form_urlencoded::byte_serialize(command.as_bytes()).collect::<String>(),
-        url::form_urlencoded::byte_serialize(label.as_bytes()).collect::<String>()
     )
 }
 fn state_name(state: &str) -> &str {

@@ -19,7 +19,7 @@ use futures_util::{SinkExt, StreamExt};
 use rand::RngCore;
 use serde_json::{Value, json};
 use std::{collections::HashMap, sync::Arc, time::Duration};
-use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
+use tokio::sync::{Mutex, Notify, RwLock, mpsc, oneshot};
 
 pub type Routes = Arc<Mutex<Durable>>;
 struct Peer {
@@ -35,6 +35,7 @@ struct Pending {
 pub struct Hub {
     peers: Arc<RwLock<HashMap<String, Peer>>>,
     pending: Arc<Mutex<HashMap<String, Pending>>>,
+    registrations: Arc<Notify>,
     pub routes: Routes,
     store: Store,
     outbox: Outbox,
@@ -62,6 +63,7 @@ impl Hub {
         let hub = Self {
             peers: Arc::new(RwLock::new(HashMap::new())),
             pending: Arc::new(Mutex::new(HashMap::new())),
+            registrations: Arc::new(Notify::new()),
             routes: Arc::new(Mutex::new(store.durable()?)),
             store,
             outbox,
@@ -91,6 +93,24 @@ impl Hub {
     }
     pub async fn session(&self, id: &str) -> Option<Session> {
         self.peers.read().await.get(id).map(|p| p.session.clone())
+    }
+    pub(crate) async fn wait_for_reload(&self, previous: &Session, token: &str) -> Option<Session> {
+        let wait = async {
+            loop {
+                let registered = self.registrations.notified();
+                tokio::pin!(registered);
+                registered.as_mut().enable();
+                if let Some(session) = self.session(&previous.id).await.filter(|s| {
+                    s.generation != previous.generation && s.reload_token.as_deref() == Some(token)
+                }) {
+                    return session;
+                }
+                registered.await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(15), wait)
+            .await
+            .ok()
     }
     pub async fn action(&self, session: &Session, mut message: Value) -> Result<Value> {
         let id = uuid::Uuid::new_v4().to_string();
@@ -146,6 +166,9 @@ impl Hub {
         {
             bail!("Pi 注册信息过长");
         }
+        session.reload_token = session
+            .reload_token
+            .filter(|token| uuid::Uuid::parse_str(token).is_ok());
         session.generation = uuid::Uuid::new_v4().to_string();
         {
             let mut routes = self.routes.lock().await;
@@ -164,6 +187,7 @@ impl Hub {
                 sender,
             },
         );
+        self.registrations.notify_waiters();
         Ok(session)
     }
     async fn handle(&self, session: &Session, message: Value) -> Result<Option<Value>> {

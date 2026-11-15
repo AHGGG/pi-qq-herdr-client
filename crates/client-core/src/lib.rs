@@ -1,5 +1,6 @@
 //! Native QQ transport, Herdr integration and the local Pi extension bridge.
 pub mod bridge;
+mod commands;
 pub mod herdr;
 pub mod install;
 pub mod media;

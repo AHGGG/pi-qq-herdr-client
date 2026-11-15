@@ -32,6 +32,10 @@
 | Pi 控制 | `/commands`、`/model`、`/thinking`、`/compact`、`/reload`、`/pi 命令 参数` |
 | 问卷与权限 | `/answer qID 1`、`/cancel qID`、`/permissions`、`/approve pID`、`/deny pID [原因]` |
 
+`/commands` 展示 Model、Thinking、Compact、Reload、All cmds、Status、Approvals、Peek 八个入口。`/commands 1` 和 `/model [页码]` 每页最多显示 12 项；命令点选后预填输入框，可追加参数，模型与 Thinking 可直接选择，当前项有标记。选项、翻页及状态入口都绑定到来源 Pi。`/help commands` 提供详细用法。修改模型/Thinking、`/compact [补充要求]`、`/reload`、`/pi 命令 参数` 需要 Pi 空闲，重载会等待同一 Pi 重新连接后再确认完成。
+
+QQ 普通消息、`/to sN 内容`、`/steer 内容` 和带附件的消息都沿用原桥接的 Steer 行为，忙碌时作为当前任务反馈；Pi 空闲时正常开始下一轮。
+
 图片支持 JPG/PNG/GIF/WebP/BMP，单张最多 30 MiB；视频支持 MP4/MOV/WebM/MKV/AVI，视频和文件最多 100 MiB。附件保存后作为本地路径提交给 Pi，不自动解析、执行或转码。
 
 自动转发每条已完成的助手文字，并在整轮 `agent_settled` 后发送完成通知。Pi 也可通过 `qq_send` 显式发送附件。入队回执和 QQ 接受回执不代表手机已经收到通知。

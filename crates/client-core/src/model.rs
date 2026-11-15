@@ -84,6 +84,7 @@ pub struct Session {
     pub pid: u32,
     pub runtime: serde_json::Value,
     pub capabilities: Vec<String>,
+    pub reload_token: Option<String>,
     #[serde(skip)]
     pub generation: String,
     #[serde(skip)]

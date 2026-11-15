@@ -34,6 +34,7 @@ pub struct Snapshot {
     pub missing: Option<Dependency>,
     pub error: Option<String>,
     pub notice: Option<String>,
+    pub menu_error: Option<String>,
     pub qr_url: Option<String>,
     pub qr_status: String,
     pub pair_code: Option<String>,

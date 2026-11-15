@@ -17,7 +17,7 @@
 
 关闭窗口后继续运行，可从托盘打开、进入设置或退出。明确退出只关闭本客户端，已有 Pi 和共享 Core 继续运行。登录后启动默认关闭，在设置中自行开启。
 
-设置还可以配置手机菜单、重新绑定 QQ、重试发送失败的通知。菜单配置会先备份原菜单并保留自定义入口。
+QQ 连接并完成配对后会自动补齐手机快捷菜单，已有指令不重复添加；需要修改时先备份原菜单并保留自定义入口。自动重连不会重复配置。若配置失败，设置中会显示原因和“重试手机菜单”；设置还可以重新绑定 QQ、重试发送失败的通知。
 
 客户端不导入旧桥接凭据。若用同一机器人替换旧网关，请先由你停止旧连接，避免两个网关同时接收；客户端不会自动停止旧网关。
 
@@ -64,7 +64,7 @@ cargo build --release -p pi-qq-herdr-client -j 4
 普通配置与运行状态默认放在 `%LOCALAPPDATA%/pi-qq-herdr-client`，QQ 授权保存在 `credentials.protected`，由 Windows DPAPI 保护。替换 EXE 或重新打包不影响绑定，在同一个 Windows 用户下启动即可复用。`PI_QQ_CLIENT_DIR` 可指定独立数据目录，`PI_CODING_AGENT_DIR` 决定配套扩展安装位置。调试时让客户端和 Pi 使用一致的环境变量。
 
 - `crates/client-core/`：QQ、Core、本机 Pi 桥接、路由与持久化。
-- `crates/desktop/`：原生窗口、二维码、托盘和桌面生命周期。`assets/` 内的原创右下角探头卡通萌物图标用于 EXE、窗口和托盘；可用 `uv run --no-project --with pillow python scripts/generate-icon.py` 重新生成。
+- `crates/desktop/`：原生窗口、二维码、托盘和桌面生命周期。`assets/` 内的暖橙底右下角探头小电脑图标用于 EXE、窗口和托盘；可用 `uv run --no-project --with pillow python scripts/generate-icon.py` 重新生成。
 - `integrations/pi/`：随 EXE 分发并安装到 Pi 的配套扩展，无额外 npm 依赖。
 
 开发先读 [AGENTS.md](AGENTS.md)。本机的 `docs/design.md`、`docs/implementation-handoff.md` 和 `docs/research/` 刻意加入 Git 忽略，不随克隆分发。

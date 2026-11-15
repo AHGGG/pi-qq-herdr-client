@@ -8,36 +8,36 @@ from PIL import Image, ImageChops, ImageDraw
 ASSETS = Path(__file__).resolve().parents[1] / "crates" / "desktop" / "assets"
 SCALE = 4
 SIZE = 256
-INK = "#383550"
-CREAM = "#FFF6ED"
+INK = "#38364F"
+SUBJECT_SCALE = 1.45
 
 
 def render_icon():
-    """An original cartoon kitten peeking into the tile from the lower right."""
+    """The selected large pocket computer on a warm orange tile."""
     image = Image.new("RGBA", (SIZE * SCALE, SIZE * SCALE))
     draw = ImageDraw.Draw(image)
     vector = []
+    subject_scale = 1.0
 
-    def ellipse(bounds, fill, stroke=None, width=1):
+    def scaled(value):
+        return 252 + (value - 252) * subject_scale
+
+    def ellipse(bounds, fill):
+        bounds = tuple(scaled(value) for value in bounds)
         x0, y0, x1, y1 = bounds
-        draw.ellipse(
-            tuple(round(n * SCALE) for n in bounds),
-            fill=fill,
-            outline=stroke,
-            width=round(width * SCALE),
-        )
+        draw.ellipse(tuple(round(n * SCALE) for n in bounds), fill=fill)
         vector.append(
             f'<ellipse cx="{(x0 + x1) / 2:g}" cy="{(y0 + y1) / 2:g}" '
-            f'rx="{(x1 - x0) / 2:g}" ry="{(y1 - y0) / 2:g}" '
-            f'fill="{fill}" stroke="{stroke or "none"}" stroke-width="{width}"/>'
+            f'rx="{(x1 - x0) / 2:g}" ry="{(y1 - y0) / 2:g}" fill="{fill}"/>'
         )
 
     def path(commands, fill=None, stroke=None, width=1):
+        commands = [(op, *[scaled(n) for n in values]) for op, *values in commands]
+        width *= subject_scale
         points = []
         svg = []
         current = (0, 0)
-        for command in commands:
-            op, *values = command
+        for op, *values in commands:
             svg.append(op + " ".join(f"{n:g}" for n in values))
             if op in ("M", "L"):
                 current = tuple(values)
@@ -49,8 +49,8 @@ def render_icon():
                     t = step / 32
                     u = 1 - t
                     points.append((
-                        u**3 * x0 + 3 * u**2 * t * x1 + 3 * u * t**2 * x2 + t**3 * x3,
-                        u**3 * y0 + 3 * u**2 * t * y1 + 3 * u * t**2 * y2 + t**3 * y3,
+                        u**3 * x0 + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t**3 * x3,
+                        u**3 * y0 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t**3 * y3,
                     ))
                 current = (x3, y3)
             elif op == "Z":
@@ -66,82 +66,47 @@ def render_icon():
                     draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=stroke)
         vector.append(
             f'<path d="{escape(" ".join(svg))}" fill="{fill or "none"}" '
-            f'stroke="{stroke or "none"}" stroke-width="{width}" '
+            f'stroke="{stroke or "none"}" stroke-width="{width:g}" '
             'stroke-linecap="round" stroke-linejoin="round"/>'
         )
 
     draw.rounded_rectangle((4 * SCALE, 4 * SCALE, 252 * SCALE, 252 * SCALE),
-                           radius=56 * SCALE, fill="#BCB6EF")
-    vector.append('<rect x="4" y="4" width="248" height="248" rx="56" fill="#BCB6EF"/>')
-    # A quiet opening at the corner gives the head somewhere to peek from.
+                           radius=56 * SCALE, fill="#EDBA91")
+    vector.append('<rect x="4" y="4" width="248" height="248" rx="56" fill="#EDBA91"/>')
     path([
-        ("M", 113, 252), ("C", 107, 210, 117, 160, 157, 139),
-        ("C", 188, 122, 228, 124, 252, 143), ("L", 252, 252), ("Z",),
-    ], fill="#9C94D4")
+        ("M", 112, 252), ("C", 109, 204, 125, 158, 171, 139),
+        ("C", 200, 126, 231, 128, 252, 144), ("L", 252, 252), ("Z",),
+    ], fill="#D79974")
     path([
-        ("M", 58, 47), ("C", 60, 59, 65, 64, 77, 66),
-        ("C", 65, 68, 60, 73, 58, 85), ("C", 56, 73, 51, 68, 39, 66),
-        ("C", 51, 64, 56, 59, 58, 47), ("Z",),
-    ], fill="#FAF5FF")
+        ("M", 59, 49), ("C", 61, 60, 66, 65, 77, 67),
+        ("C", 66, 69, 61, 74, 59, 85), ("C", 57, 74, 52, 69, 41, 67),
+        ("C", 52, 65, 57, 60, 59, 49), ("Z",),
+    ], fill="#FFF9F4")
 
-    # Round cheeks, oversized animated eyes and soft ears identify a creature.
-    # The right cheek and chin continue out of frame to create the peeking pose.
-    face = [
-        ("M", 139, 166), ("C", 131, 149, 128, 127, 133, 108),
-        ("C", 147, 111, 162, 124, 171, 138),
-        ("C", 191, 126, 218, 125, 238, 136),
-        ("C", 245, 121, 255, 109, 266, 108),
-        ("C", 270, 126, 270, 145, 265, 164),
-        ("C", 281, 184, 281, 212, 268, 234),
-        ("C", 258, 259, 233, 274, 204, 276),
-        ("C", 171, 277, 143, 258, 134, 237),
-        ("C", 123, 220, 123, 190, 139, 166), ("Z",),
+    # Scale only the computer, anchored at the corner, to match the selected preview.
+    subject_scale = SUBJECT_SCALE
+    body = [
+        ("M", 139, 138), ("C", 140, 126, 151, 120, 164, 122),
+        ("L", 261, 136), ("C", 275, 138, 281, 150, 279, 164),
+        ("L", 266, 267), ("L", 126, 265), ("Z",),
     ]
-    path(face, fill=CREAM, stroke="#FFFDFC", width=11)
-    path(face, fill=CREAM, stroke=INK, width=4.5)
+    path(body, fill="#E9F5E4", stroke="#FFFDFC", width=10.5)
+    path(body, fill="#E9F5E4", stroke=INK, width=4.5)
     path([
-        ("M", 140, 124), ("C", 140, 135, 145, 146, 151, 151),
-        ("L", 159, 144), ("C", 153, 134, 147, 127, 140, 124), ("Z",),
-    ], fill="#E5B3CC")
+        ("M", 155, 145), ("L", 257, 158), ("L", 249, 224),
+        ("L", 146, 211), ("Z",),
+    ], fill="#47615F", stroke=INK, width=3)
     path([
-        ("M", 258, 125), ("C", 251, 131, 247, 141, 246, 146),
-        ("L", 259, 154), ("C", 262, 143, 261, 134, 258, 125), ("Z",),
-    ], fill="#E5B3CC")
+        ("M", 161, 156), ("L", 169, 162), ("L", 159, 167),
+    ], stroke="#C8EBD4", width=3.6)
+    ellipse((178, 175, 189, 192), "#DDF7D7")
+    ellipse((225, 181, 236, 198), "#DDF7D7")
     path([
-        ("M", 178, 145), ("C", 188, 138, 206, 135, 217, 140),
-        ("C", 210, 152, 193, 158, 180, 153), ("Z",),
-    ], fill="#AED6C8")
-
-    ellipse((159, 181, 183, 212), INK)
-    ellipse((219, 176, 243, 207), INK)
-    ellipse((164, 183, 173, 193), "#FFFDFC")
-    ellipse((224, 178, 233, 188), "#FFFDFC")
-    ellipse((173, 201, 178, 206), "#A69CD1")
-    ellipse((233, 196, 238, 201), "#A69CD1")
-    ellipse((147, 216, 173, 229), "#F3B2BE")
-    ellipse((237, 210, 263, 223), "#F3B2BE")
-    path([
-        ("M", 194, 214), ("C", 196, 212, 201, 212, 203, 214),
-        ("L", 199, 218), ("Z",),
-    ], fill="#C58CA1")
-    path([
-        ("M", 188, 222), ("C", 189, 230, 196, 231, 199, 224),
-        ("C", 203, 231, 211, 228, 212, 220),
-    ], stroke=INK, width=4)
-    # A small padded paw hooks over the opening.
-    paw = [
-        ("M", 115, 232), ("C", 110, 225, 111, 217, 118, 215),
-        ("C", 120, 206, 129, 205, 133, 211),
-        ("C", 139, 208, 146, 212, 146, 219),
-        ("C", 153, 223, 150, 235, 144, 238),
-        ("C", 133, 243, 121, 241, 115, 232), ("Z",),
-    ]
-    path(paw, fill=CREAM, stroke="#FFFDFC", width=9)
-    path(paw, fill=CREAM, stroke=INK, width=3.5)
-    ellipse((123, 224, 139, 235), "#E5B3CC")
-    ellipse((120, 215, 125, 220), "#E5B3CC")
-    ellipse((130, 214, 135, 219), "#E5B3CC")
-    ellipse((139, 219, 144, 224), "#E5B3CC")
+        ("M", 198, 199), ("C", 202, 206, 210, 206, 215, 197),
+    ], stroke="#DDF7D7", width=3.6)
+    ellipse((235, 236, 244, 245), "#EAA588")
+    path([("M", 147, 233), ("L", 172, 236)], stroke="#A0B7A5", width=4)
+    path([("M", 143, 244), ("L", 163, 246)], stroke="#A0B7A5", width=3)
 
     mask = Image.new("L", image.size)
     ImageDraw.Draw(mask).rounded_rectangle(
@@ -162,4 +127,4 @@ if __name__ == "__main__":
     sizes = (16, 20, 24, 32, 40, 48, 64, 128, 256)
     image.save(ASSETS / "pi-qq.ico", sizes=[(n, n) for n in sizes])
     (ASSETS / "pi-qq.svg").write_text(svg, encoding="utf-8")
-    print(f"Generated corner-peeking cartoon kitten PNG, ICO and SVG in {ASSETS}")
+    print(f"Generated selected pocket-computer PNG, ICO and SVG in {ASSETS}")

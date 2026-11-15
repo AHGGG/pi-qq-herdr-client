@@ -71,7 +71,7 @@ async fn run(
     let hub = Hub::start(store.clone(), outbox.clone(), events).await?;
     let (route_tx, mut route_rx) = mpsc::channel(128);
     let (errors, mut error_rx) = mpsc::unbounded_channel::<String>();
-    let (notices, mut notice_rx) = mpsc::unbounded_channel::<String>();
+    let (menu_results, mut menu_rx) = mpsc::unbounded_channel::<(String, Option<String>)>();
     let mut router = Router::new(hub.clone(), outbox.clone(), core.clone(), config.clone());
     let routing_http = http.clone();
     // User tasks can take time (new Pi registration, file transfer). They must not
@@ -120,6 +120,7 @@ async fn run(
     let mut qr_job = None::<tokio::task::JoinHandle<()>>;
     let (_, mut qr_rx) = mpsc::channel(8);
     let mut gateway = None::<tokio::task::JoinHandle<()>>;
+    let mut menu_job = None::<(String, tokio::task::JoinHandle<()>)>;
     let (_, mut gateway_rx) = mpsc::channel(128);
     let mut pairing = None::<(String, Instant)>;
     detect(&config, &core, &mut snapshot).await;
@@ -175,6 +176,8 @@ async fn run(
                     Command::Rebind => {
                         if let Some(job) = qr_job.take() { job.abort(); }
                         if let Some(job) = gateway.take() { job.abort(); }
+                        if let Some((_, job)) = menu_job.take() { job.abort(); }
+                        snapshot.menu_error = None;
                         snapshot.qr_url = None; snapshot.qq_ready = false; pairing = None;
                         binding_tx.send_replace(None); credentials = None;
                         if let Err(error) = store.forget_credentials() { snapshot.error = Some(error.to_string()); }
@@ -198,17 +201,10 @@ async fn run(
                         }
                     }
                     Command::ConfigureMenu => {
-                        let binding = binding_tx.borrow().clone().filter(|b| b.ready);
-                        if let Some(binding) = binding {
-                            let store = store.clone(); let notices = notices.clone();
-                            tokio::spawn(async move {
-                                let message = match crate::menu::configure(&binding.api, &store).await {
-                                    Ok(()) => "手机菜单已配置，原有自定义入口和备份已保留。".into(),
-                                    Err(error) => error.to_string(),
-                                };
-                                let _ = notices.send(message);
-                            });
-                        } else { snapshot.error = Some("请先完成 QQ 连接和配对。".into()); }
+                        if binding_tx.borrow().as_ref().is_some_and(|b| b.ready) {
+                            if let Some((_, job)) = menu_job.take() { job.abort(); }
+                            snapshot.menu_error = None;
+                        } else { snapshot.menu_error = Some("请先完成 QQ 连接和配对。".into()); }
                     }
                     Command::SendGuide => {
                         match send_guide(&outbox, true).await {
@@ -294,7 +290,11 @@ async fn run(
                 }
             }
             Some(error) = error_rx.recv() => snapshot.error = Some(error),
-            Some(notice) = notice_rx.recv() => snapshot.notice = Some(notice),
+            Some((scope, error)) = menu_rx.recv() => {
+                if binding_tx.borrow().as_ref().is_some_and(|b| b.scope() == scope) {
+                    snapshot.menu_error = error;
+                }
+            }
             _ = tick.tick() => {
                 if let Some(core) = core.read().await.as_ref() {
                     let catalog = core.catalog.read().await;
@@ -308,6 +308,34 @@ async fn run(
         }
         snapshot.owner_bound = credentials.as_ref().is_some_and(|c| c.owner.is_some());
         snapshot.guide_status = outbox.guide_status().await;
+        if snapshot.qq_ready && snapshot.owner_bound {
+            let binding = binding_tx.borrow().clone().filter(|b| b.ready);
+            if let Some(binding) = binding {
+                let scope = binding.scope();
+                if menu_job
+                    .as_ref()
+                    .is_none_or(|(current, _)| current != &scope)
+                {
+                    if let Some((_, job)) = menu_job.take() {
+                        job.abort();
+                    }
+                    snapshot.menu_error = None;
+                    let store = store.clone();
+                    let results = menu_results.clone();
+                    let result_scope = scope.clone();
+                    let job = tokio::spawn(async move {
+                        let error = crate::menu::configure(&binding.api, &store)
+                            .await
+                            .err()
+                            .map(|error| error.to_string());
+                        let _ = results.send((result_scope, error));
+                    });
+                    // Retain the completed handle so gateway reconnects do not
+                    // reconfigure the menu; a new binding or explicit retry can.
+                    menu_job = Some((scope, job));
+                }
+            }
+        }
         if snapshot.qq_ready
             && snapshot.owner_bound
             && snapshot.guide_status == GuideStatus::NotSent
@@ -324,6 +352,9 @@ async fn run(
         job.abort();
     }
     if let Some(job) = gateway {
+        job.abort();
+    }
+    if let Some((_, job)) = menu_job {
         job.abort();
     }
     let _ = std::fs::remove_file(store.root().join("bridge.json"));

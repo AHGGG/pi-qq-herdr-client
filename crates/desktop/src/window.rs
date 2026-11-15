@@ -272,11 +272,28 @@ impl ClientWindow {
                             cx.notify();
                         })),
                 )
-                .when(self.snapshot.qq_ready && self.snapshot.owner_bound, |el| {
-                    el.child(Button::new("setup-menu").label("配置手机菜单").on_click(
-                        cx.listener(|this, _, _, cx| this.send(Command::ConfigureMenu, cx)),
-                    ))
-                })
+                .when(
+                    self.snapshot.qq_ready
+                        && self.snapshot.owner_bound
+                        && self.snapshot.menu_error.is_some(),
+                    |el| {
+                        el.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(div().text_sm().child(format!(
+                                    "手机快捷菜单配置失败：{}",
+                                    self.snapshot.menu_error.as_deref().unwrap_or_default()
+                                )))
+                                .child(Button::new("retry-menu").label("重试手机菜单").on_click(
+                                    cx.listener(|this, _, _, cx| {
+                                        this.send(Command::ConfigureMenu, cx)
+                                    }),
+                                )),
+                        )
+                    },
+                )
                 .when(self.snapshot.failed_deliveries > 0, |el| {
                     el.child(
                         Button::new("retry-outbox")

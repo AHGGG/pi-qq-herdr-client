@@ -113,7 +113,7 @@ async fn run(
     for source in outbox.recovered_sources(scope.as_deref()).await {
         let mut routes = hub.routes.lock().await;
         for reference in source.references {
-            routes.sources.insert(reference, source.source.clone());
+            routes.remember_source(reference, source.source.clone());
         }
     }
     hub.save_routes().await?;
@@ -180,7 +180,7 @@ async fn run(
                         if let Err(error) = store.forget_credentials() { snapshot.error = Some(error.to_string()); }
                         {
                             let mut routes = hub.routes.lock().await;
-                            routes.selected = None; routes.workspace = None; routes.sources.clear(); routes.seen.clear();
+                            routes.selected = None; routes.workspace = None; routes.sources.clear(); routes.source_order.clear(); routes.pending_launches.clear(); routes.seen.clear();
                         }
                         if let Err(error) = hub.save_routes().await { snapshot.error = Some(error.to_string()); }
                         snapshot.qr_status = "点击扫码连接".into();
@@ -288,8 +288,7 @@ async fn run(
                 if let Some(accepted) = accepted {
                     if binding_tx.borrow().as_ref().is_none_or(|b| b.scope() != accepted.scope) { continue; }
                     let mut routes = hub.routes.lock().await;
-                    for reference in accepted.references { routes.sources.insert(reference, accepted.source.clone()); }
-                    while routes.sources.len() > 500 { let key = routes.sources.keys().next().cloned().unwrap(); routes.sources.remove(&key); }
+                    for reference in accepted.references { routes.remember_source(reference, accepted.source.clone()); }
                     drop(routes);
                     if let Err(error) = hub.save_routes().await { snapshot.error = Some(error.to_string()); }
                 }

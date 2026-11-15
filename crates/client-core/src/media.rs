@@ -122,7 +122,8 @@ fn validate(b: &[u8], kind: &str) -> Result<()> {
             (b.len() >= 16
                 && b.get(4..8) == Some(b"ftyp")
                 && ![
-                    b"avif", b"avis", b"heic", b"heix", b"hevc", b"mif1", b"M4A ", b"M4B ",
+                    b"avif", b"avis", b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1",
+                    b"miaf", b"M4A ", b"M4B ", b"M4P ",
                 ]
                 .iter()
                 .any(|v| b.get(8..12) == Some(*v)))
@@ -160,7 +161,7 @@ fn download_url(value: &str, kind: &str) -> Result<url::Url> {
     }
     Ok(url)
 }
-pub async fn receive(http: &reqwest::Client, message: &Value) -> Result<Vec<Attachment>> {
+fn message_attachments(message: &Value) -> Vec<&Value> {
     let mut entries = Vec::new();
     if let Some(xs) = message["attachments"].as_array() {
         entries.extend(xs.iter());
@@ -173,20 +174,73 @@ pub async fn receive(http: &reqwest::Client, message: &Value) -> Result<Vec<Atta
         }
     }
     let mut seen = std::collections::HashSet::new();
-    entries.retain(|x| seen.insert(x["url"].as_str().unwrap_or_default()));
+    entries.retain(|x| x["url"].as_str().is_none_or(|url| seen.insert(url)));
+    entries
+}
+
+pub fn has_attachments(message: &Value) -> bool {
+    !message_attachments(message).is_empty()
+}
+
+fn attachment_kind(entry: &Value) -> &'static str {
+    let mime = entry["content_type"]
+        .as_str()
+        .unwrap_or_default()
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if mime == "file" {
+        return "file";
+    }
+    if matches!(
+        mime.as_str(),
+        "image/jpeg" | "image/jpg" | "image/png" | "image/gif" | "image/webp" | "image/bmp"
+    ) {
+        return "image";
+    }
+    if mime.starts_with("video/") {
+        return "video";
+    }
+    if mime.is_empty() || mime == "application/octet-stream" {
+        let filename = entry["filename"].as_str().unwrap_or_default();
+        let url = entry["url"].as_str().and_then(|raw| {
+            url::Url::parse(&if raw.starts_with("//") {
+                format!("https:{raw}")
+            } else {
+                raw.into()
+            })
+            .ok()
+        });
+        let names = [filename, url.as_ref().map_or("", |url| url.path())];
+        for extensions in [
+            ("image", &["jpg", "jpeg", "png", "gif", "webp", "bmp"][..]),
+            ("video", &["mp4", "mov", "webm", "mkv", "avi"][..]),
+        ] {
+            if names.iter().any(|name| {
+                name.rsplit_once('.').is_some_and(|(_, ext)| {
+                    extensions
+                        .1
+                        .iter()
+                        .any(|candidate| ext.eq_ignore_ascii_case(candidate))
+                })
+            }) {
+                return extensions.0;
+            }
+        }
+    }
+    "file"
+}
+
+pub async fn receive(http: &reqwest::Client, message: &Value) -> Result<Vec<Attachment>> {
+    let entries = message_attachments(message);
     if entries.len() > 10 {
         bail!("每条消息最多发送 10 个附件");
     }
     let mut result = Vec::new();
     for entry in entries {
-        let mime = entry["content_type"].as_str().unwrap_or_default();
-        let kind = if mime.starts_with("image/") {
-            "image"
-        } else if mime.starts_with("video/") {
-            "video"
-        } else {
-            "file"
-        };
+        let kind = attachment_kind(entry);
         let mut url = download_url(entry["url"].as_str().context("QQ 附件缺少下载地址")?, kind)?;
         let mut saved = false;
         for redirects in 0..=3 {

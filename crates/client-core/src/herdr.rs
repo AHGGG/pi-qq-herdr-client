@@ -87,6 +87,7 @@ impl Core {
         &self,
         cwd: &str,
         workspace: Option<&WorkspaceId>,
+        source: Option<&Session>,
     ) -> Result<(String, u32)> {
         if !std::path::Path::new(cwd).is_dir() {
             bail!("工作目录无效，请在桌面设置中重新选择");
@@ -121,10 +122,27 @@ impl Core {
         if let Some(root) = std::env::var_os("PI_QQ_CLIENT_DIR") {
             env.insert("PI_QQ_CLIENT_DIR".into(), json!(root.to_string_lossy()));
         }
+        let mut argv = vec![self.environment.pi.to_string_lossy().into_owned()];
+        if let Some(source) = source {
+            if let (Some(provider), Some(model)) = (
+                source.runtime["model"]["provider"].as_str(),
+                source.runtime["model"]["id"].as_str(),
+            ) {
+                argv.extend([
+                    "--provider".into(),
+                    provider.into(),
+                    "--model".into(),
+                    model.into(),
+                ]);
+            }
+            if let Some(level) = source.runtime["thinkingLevel"].as_str() {
+                argv.extend(["--thinking".into(), level.into()]);
+            }
+        }
         let result = self
             .request(
                 "terminal.run",
-                json!({"argv":[self.environment.pi], "cwd":cwd, "env":env,
+                json!({"argv":argv, "cwd":cwd, "env":env,
             "labels":labels, "no_parent":true,"wait":false,"keep":workspace.is_some()}),
             )
             .await?;

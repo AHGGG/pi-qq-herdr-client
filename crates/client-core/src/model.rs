@@ -102,7 +102,43 @@ pub struct Durable {
     pub workspace: Option<WorkspaceId>,
     pub names: BTreeMap<String, String>,
     pub sources: BTreeMap<String, String>,
+    pub source_order: Vec<String>,
+    pub pending_launches: BTreeMap<String, PendingLaunch>,
     pub seen: Vec<String>,
+}
+
+impl Durable {
+    pub(crate) fn remember_source(&mut self, reference: String, source: String) {
+        // Older state has no order field. Keep unknown-age entries ahead of
+        // references whose acceptance order is known (including receipt recovery).
+        if self.source_order.len() != self.sources.len() {
+            self.source_order
+                .retain(|key| self.sources.contains_key(key));
+            let mut missing: Vec<_> = self
+                .sources
+                .keys()
+                .filter(|key| !self.source_order.contains(key))
+                .cloned()
+                .collect();
+            missing.append(&mut self.source_order);
+            self.source_order = missing;
+        }
+        self.source_order.retain(|key| key != &reference);
+        self.source_order.push(reference.clone());
+        self.sources.insert(reference, source);
+        while self.source_order.len() > 500 {
+            self.sources.remove(&self.source_order.remove(0));
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PendingLaunch {
+    pub scope: String,
+    pub core_id: String,
+    pub terminal: String,
+    pub pid: u32,
+    pub expires: u64,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]

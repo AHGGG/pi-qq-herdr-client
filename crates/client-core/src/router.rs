@@ -3,7 +3,7 @@ use crate::{
     commands,
     herdr::Core,
     media,
-    model::{Config, Session, Workspace, clean},
+    model::{Config, PendingLaunch, Session, Workspace, clean},
     outbox::Outbox,
     qq,
 };
@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::RwLock;
 
@@ -38,6 +38,7 @@ pub struct Router {
     questions: HashMap<String, Interaction>,
     permissions: HashMap<String, Interaction>,
     closes: HashMap<String, Close>,
+    reply_source: Option<String>,
 }
 impl Router {
     pub fn new(
@@ -55,6 +56,7 @@ impl Router {
             questions: HashMap::new(),
             permissions: HashMap::new(),
             closes: HashMap::new(),
+            reply_source: None,
         }
     }
     async fn send(
@@ -101,9 +103,11 @@ impl Router {
             }
         }
         self.hub.save_routes().await?;
+        self.reply_source = None;
         let result = self.route(http, &message).await;
         if let Err(error) = result {
-            self.send(&format!("{}", error), None, &[]).await?;
+            self.send(&format!("{}", error), self.reply_source.as_deref(), &[])
+                .await?;
         }
         Ok(())
     }
@@ -116,38 +120,69 @@ impl Router {
     }
     async fn target(&self, explicit: Option<&str>, quote: Option<&str>) -> Result<Session> {
         let sessions = self.hub.sessions().await;
-        let routes = self.hub.routes.lock().await;
-        let quoted = quote
-            .map(|q| {
-                routes
-                    .sources
-                    .get(q)
-                    .context("这条引用没有可识别的 Pi 来源，请使用 /sessions 重新选择")
-            })
-            .transpose()?;
-        let selected = if let Some(slot) = explicit {
-            let s = sessions
+        let (quoted, selected, workspace) = {
+            let routes = self.hub.routes.lock().await;
+            let quoted = quote
+                .map(|reference| {
+                    routes
+                        .sources
+                        .get(reference)
+                        .cloned()
+                        .context("这条引用没有可识别的 Pi 来源，请使用 /sessions 重新选择")
+                })
+                .transpose()?;
+            (quoted, routes.selected.clone(), routes.workspace.clone())
+        };
+        if let Some(slot) = explicit {
+            let session = sessions
                 .iter()
                 .find(|s| s.slot == slot)
                 .context("指定 Pi 已离线，请刷新 /sessions")?;
-            if quoted.is_some_and(|id| id != &s.id) {
+            if quoted.as_ref().is_some_and(|id| id != &session.id) {
                 bail!("指定会话与引用来源不同，请明确选择后重发");
             }
-            return Ok(s.clone());
-        } else if let Some(id) = quoted {
-            Some(id)
+            return Ok(session.clone());
+        }
+        if let Some(id) = quoted {
+            return sessions
+                .into_iter()
+                .find(|s| s.id == id)
+                .context("引用来源 Pi 已离线，消息没有发给其他 Pi");
+        }
+        let members = if let Some(key) = workspace {
+            let core = self.core().await?;
+            let catalog = core.catalog.read().await;
+            let workspace = catalog
+                .workspaces
+                .iter()
+                .find(|w| w.key == key)
+                .context("选中的工作区已不可用，请重新发送 /workspaces 选择")?;
+            Some(workspace.terminals.clone())
         } else {
-            routes.selected.as_ref()
+            None
+        };
+        let in_workspace = |s: &Session| {
+            members.as_ref().is_none_or(|terminals| {
+                s.terminal
+                    .as_ref()
+                    .is_some_and(|terminal| terminals.contains(terminal))
+            })
         };
         if let Some(id) = selected {
-            return sessions
+            let session = sessions
                 .iter()
-                .find(|s| &s.id == id)
-                .cloned()
-                .context("原会话已离线。请发送 /sessions 重新选择；消息没有发给其他 Pi");
+                .find(|s| s.id == id)
+                .context("原会话已离线。请发送 /sessions 重新选择；消息没有发给其他 Pi")?;
+            if !in_workspace(session) {
+                bail!("选中的 Pi 不在当前工作区，请发送 /sessions 重新选择，消息未发送。");
+            }
+            return Ok(session.clone());
         }
-        if sessions.len() == 1 {
-            return Ok(sessions[0].clone());
+        let mut eligible = sessions.into_iter().filter(in_workspace);
+        if let Some(session) = eligible.next() {
+            if eligible.next().is_none() {
+                return Ok(session);
+            }
         }
         bail!("请先发送 /sessions 选择 Pi；没有会话时可发送 /new 创建")
     }
@@ -196,12 +231,19 @@ impl Router {
             explicit = Some(slot.to_string());
             text = body.trim().to_string();
         }
-        let (command, args) = if let Some(rest) = text.strip_prefix('/') {
+        let input = text.strip_prefix('/').or_else(|| {
+            let name = text.split_whitespace().next().unwrap_or_default();
+            name.eq_ignore_ascii_case("answer").then_some(text.as_str())
+        });
+        let (command, args) = if let Some(rest) = input {
             let (command, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
             (command.to_ascii_lowercase(), args.trim().to_string())
         } else {
             (String::new(), text.clone())
         };
+        if media::has_attachments(message) && !matches!(command.as_str(), "" | "steer") {
+            bail!("请将命令和附件分开发送。附件可配普通文字、/to sN 内容或 /steer 内容。");
+        }
         match command.as_str() {
             "help" => {
                 if args.eq_ignore_ascii_case("commands") {
@@ -257,7 +299,22 @@ impl Router {
                     .into_iter()
                     .find(|(s, _)| s == slot)
                     .context("工作区不存在，请刷新 /workspaces")?;
-                self.hub.routes.lock().await.workspace = Some(w.key);
+                let members: Vec<_> = self
+                    .hub
+                    .sessions()
+                    .await
+                    .into_iter()
+                    .filter(|s| {
+                        s.terminal
+                            .as_ref()
+                            .is_some_and(|terminal| w.terminals.contains(terminal))
+                    })
+                    .collect();
+                {
+                    let mut routes = self.hub.routes.lock().await;
+                    routes.workspace = Some(w.key);
+                    routes.selected = (members.len() == 1).then(|| members[0].id.clone());
+                }
                 self.hub.save_routes().await?;
                 return self
                     .send(
@@ -316,7 +373,27 @@ impl Router {
             "use" => {
                 let slot = args.split_whitespace().next().context("用法：/use sN")?;
                 let s = self.target(Some(slot), None).await?;
-                self.hub.routes.lock().await.selected = Some(s.id.clone());
+                self.reply_source = Some(s.id.clone());
+                let workspace = if let Some(core) = self.core.read().await.as_ref() {
+                    core.catalog
+                        .read()
+                        .await
+                        .workspaces
+                        .iter()
+                        .find(|w| {
+                            s.terminal
+                                .as_ref()
+                                .is_some_and(|terminal| w.terminals.contains(terminal))
+                        })
+                        .map(|w| w.key.clone())
+                } else {
+                    None
+                };
+                {
+                    let mut routes = self.hub.routes.lock().await;
+                    routes.selected = Some(s.id.clone());
+                    routes.workspace = workspace;
+                }
                 self.hub.save_routes().await?;
                 return self
                     .session_send(&s, "已选择，可以直接发送消息。", &navigation(&s))
@@ -333,6 +410,11 @@ impl Router {
                             .await?,
                     )
                 };
+                self.reply_source = source.as_ref().map(|s| s.id.clone());
+                let scope = self
+                    .expected_scope
+                    .clone()
+                    .context("QQ 消息缺少绑定来源，新建未执行")?;
                 let key = self.hub.routes.lock().await.workspace.clone();
                 let cwd = if let Some(key) = &key {
                     core.catalog
@@ -344,8 +426,8 @@ impl Router {
                         .context("工作区已不可用，请重新选择")?
                         .cwd
                         .clone()
-                } else if let Some(source) = source {
-                    source.cwd
+                } else if let Some(source) = source.as_ref() {
+                    source.cwd.clone()
                 } else {
                     config
                         .default_directory
@@ -353,7 +435,25 @@ impl Router {
                         .to_string_lossy()
                         .to_string()
                 };
-                let (terminal, _) = core.launch(&cwd, key.as_ref()).await?;
+                let (terminal, pid) = core.launch(&cwd, key.as_ref(), source.as_ref()).await?;
+                let core_id = core.catalog.read().await.core_id.clone();
+                {
+                    let mut routes = self.hub.routes.lock().await;
+                    routes
+                        .pending_launches
+                        .retain(|_, launch| launch.expires > now());
+                    routes.pending_launches.insert(
+                        terminal.clone(),
+                        PendingLaunch {
+                            scope,
+                            core_id,
+                            terminal: terminal.clone(),
+                            pid,
+                            expires: now() + 5 * 60,
+                        },
+                    );
+                }
+                self.hub.save_routes().await?;
                 self.send("Pi 终端已创建，正在等待扩展连接……", None, &[])
                     .await?;
                 // The Core acknowledgement does not prove Pi has registered. Never retry spawn.
@@ -365,16 +465,13 @@ impl Router {
                         .into_iter()
                         .find(|s| s.terminal.as_deref() == Some(&terminal))
                     {
-                        core.validate(&s).await?;
-                        self.hub.routes.lock().await.selected = Some(s.id.clone());
-                        self.hub.save_routes().await?;
-                        return self
-                            .session_send(&s, "新 Pi 已连接并选中。", &navigation(&s))
-                            .await;
+                        if self.complete_launch(&s, true).await? {
+                            return Ok(());
+                        }
                     }
                     tokio::time::sleep(Duration::from_millis(500)).await;
                 }
-                return self.send("终端已创建，但 Pi 扩展尚未确认连接。请查看 /sessions 和 Herdr；不要重复 /new。",None,&[("Pi 会话","/sessions all".into())]).await;
+                return self.send("终端已创建，但 Pi 扩展尚未确认连接。连接成功后会补发通知；可查看 /sessions 和 Herdr，请不要重复 /new。",None,&[("Pi 会话","/sessions all".into())]).await;
             }
             "answer" | "cancel" | "pick" => {
                 return self
@@ -403,6 +500,7 @@ impl Router {
             }
         }
         let session = self.target(explicit.as_deref(), quote.as_deref()).await?;
+        self.reply_source = Some(session.id.clone());
         match command.as_str() {
             "status" => {
                 let runtime = &session.runtime;
@@ -493,7 +591,10 @@ impl Router {
                     .hub
                     .action(&session, json!({"action":"permission_list"}))
                     .await?;
-                let active = result["requests"].as_array().cloned().unwrap_or_default();
+                if result["status"] != "completed" || !result["requests"].is_array() {
+                    bail!("Pi 未确认权限列表，请查看终端后再重试。");
+                }
+                let active = result["requests"].as_array().cloned().unwrap();
                 self.permissions.retain(|_, p| {
                     p.session != session.id
                         || active
@@ -501,7 +602,7 @@ impl Router {
                             .any(|a| a["requestId"] == p.payload["requestId"])
                 });
                 for payload in active {
-                    self.open_permission(&session, payload).await?;
+                    self.open_permission(&session, payload, true).await?;
                 }
                 if !self.permissions.values().any(|p| p.session == session.id) {
                     self.session_send(&session,"没有可从手机回答的权限请求。策略自动允许的操作不会询问；其他弹窗请查看 Pi 终端。",&navigation(&session)).await?;
@@ -567,11 +668,74 @@ impl Router {
             _ => bail!("未知指令。发送 /help 查看手机命令；Pi 扩展命令请用 /pi 命令 参数。"),
         }
     }
+    async fn complete_launch(&mut self, session: &Session, select: bool) -> Result<bool> {
+        let Some(terminal) = session.terminal.as_ref() else {
+            return Ok(false);
+        };
+        let pending = self
+            .hub
+            .routes
+            .lock()
+            .await
+            .pending_launches
+            .get(terminal)
+            .cloned();
+        let Some(pending) = pending else {
+            return Ok(false);
+        };
+        if pending.expires <= now() {
+            self.hub
+                .routes
+                .lock()
+                .await
+                .pending_launches
+                .remove(terminal);
+            self.hub.save_routes().await?;
+            return Ok(false);
+        }
+        let core = self.core().await?;
+        if core.catalog.read().await.core_id != pending.core_id {
+            return Ok(false);
+        }
+        let record = core.validate(session).await?;
+        if record["pid"].as_u64() != Some(pending.pid as u64) {
+            return Ok(false);
+        }
+        let text = if select {
+            "新 Pi 已连接并选中。"
+        } else {
+            "新 Pi 已连接，可点击「选择此 Pi」继续。"
+        };
+        self.outbox
+            .enqueue(
+                Some(&pending.scope),
+                &format!(
+                    "[{} · {}]\n{text}",
+                    session.slot,
+                    clean(&session.label, 100)
+                ),
+                Some(&session.id),
+                keyboard(&navigation(session)),
+                true,
+                None,
+            )
+            .await?;
+        {
+            let mut routes = self.hub.routes.lock().await;
+            routes.pending_launches.remove(terminal);
+            if select {
+                routes.selected = Some(session.id.clone());
+            }
+        }
+        self.hub.save_routes().await?;
+        Ok(true)
+    }
     async fn confirm_close(&mut self, args: &str) -> Result<()> {
         let ticket = self
             .closes
             .remove(args)
             .context("关闭确认已失效，请重新 /close")?;
+        self.reply_source = Some(ticket.session.id.clone());
         if ticket.created.elapsed() > Duration::from_secs(120) {
             bail!("关闭确认已过期，请重新 /close");
         }
@@ -593,7 +757,9 @@ impl Router {
     }
     pub async fn event(&mut self, event: BridgeEvent) -> Result<()> {
         match event {
-            BridgeEvent::Registered(_session) => {}
+            BridgeEvent::Registered(session) => {
+                self.complete_launch(&session, false).await?;
+            }
             BridgeEvent::Disconnected(id, generation) => {
                 self.questions
                     .retain(|_, p| p.session != id || p.generation != generation);
@@ -678,7 +844,7 @@ impl Router {
                     "question_close" => self.questions.retain(|_, p| {
                         p.session != session || p.payload["toolCallId"] != message["toolCallId"]
                     }),
-                    "permission_open" => self.open_permission(&s, message).await?,
+                    "permission_open" => self.open_permission(&s, message, false).await?,
                     "permission_close" => self.permissions.retain(|_, p| {
                         p.session != session || p.payload["requestId"] != message["permissionId"]
                     }),
@@ -688,7 +854,12 @@ impl Router {
         }
         Ok(())
     }
-    async fn open_permission(&mut self, s: &Session, payload: Value) -> Result<()> {
+    async fn open_permission(
+        &mut self,
+        s: &Session,
+        payload: Value,
+        redisplay: bool,
+    ) -> Result<()> {
         let text = payload["text"]
             .as_str()
             .filter(|s| s.len() <= 12000)
@@ -696,14 +867,20 @@ impl Router {
         if !payload["requestId"].is_string() {
             bail!("权限请求无效");
         }
-        if self
+        let existing = self
             .permissions
-            .values()
-            .any(|p| p.session == s.id && p.payload["requestId"] == payload["requestId"])
-        {
+            .iter()
+            .find(|(_, p)| {
+                p.session == s.id
+                    && p.generation == s.generation
+                    && p.payload["requestId"] == payload["requestId"]
+            })
+            .map(|(reference, _)| reference.clone());
+        if existing.is_some() && !redisplay {
             return Ok(());
         }
-        let reference = format!("p{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
+        let reference = existing
+            .unwrap_or_else(|| format!("p{}", &uuid::Uuid::new_v4().simple().to_string()[..12]));
         let display = markdown_text(text);
         if display.chars().count() > 18000 {
             bail!("权限内容超出手机显示范围，请在终端处理");
@@ -738,12 +915,14 @@ impl Router {
             .permissions
             .get(reference)
             .context("权限请求已关闭，请查看 /permissions")?;
+        self.reply_source = Some(p.session.clone());
         let s = self
             .hub
             .session(&p.session)
             .await
             .filter(|s| s.generation == p.generation)
             .context("原 Pi 已离线，没有发送权限回答")?;
+        self.reply_source = Some(s.id.clone());
         if command == "permission" {
             return self
                 .session_send(
@@ -785,30 +964,88 @@ impl Router {
         quote: Option<&str>,
     ) -> Result<()> {
         let (first, rest) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
-        let (reference, body) = if first.starts_with('q') {
-            (first.to_string(), rest.to_string())
+        let selector = first.to_ascii_lowercase();
+        let question_id = selector.starts_with('q')
+            && selector.len() > 1
+            && selector[1..].chars().all(|c| c.is_ascii_hexdigit());
+        let slot = is_slot(&selector, 's').then_some(selector.as_str());
+        if slot.is_some() && explicit.is_some() && slot != explicit {
+            bail!("指定了两个不同的 Pi，请明确选择后重发。");
+        }
+        let body = if question_id || slot.is_some() {
+            rest
         } else {
-            let s = self.target(explicit, quote).await?;
-            let matches: Vec<_> = self
+            args
+        };
+        let reference = if question_id {
+            selector.clone()
+        } else {
+            let selected = self.hub.routes.lock().await.selected.is_some();
+            let target = if slot.is_some() || explicit.is_some() || quote.is_some() || selected {
+                let s = self.target(slot.or(explicit), quote).await?;
+                self.reply_source = Some(s.id.clone());
+                Some(s.id)
+            } else {
+                None
+            };
+            let sessions = self.hub.sessions().await;
+            let workspace = self.hub.routes.lock().await.workspace.clone();
+            let terminals = if target.is_none() {
+                if let Some(key) = workspace {
+                    let core = self.core().await?;
+                    let catalog = core.catalog.read().await;
+                    Some(
+                        catalog
+                            .workspaces
+                            .iter()
+                            .find(|w| w.key == key)
+                            .context("工作区已不可用，请重新选择 /workspaces")?
+                            .terminals
+                            .clone(),
+                    )
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let candidates: Vec<_> = self
                 .questions
                 .iter()
-                .filter(|(_, q)| q.session == s.id)
+                .filter(|(_, q)| {
+                    sessions.iter().any(|s| {
+                        s.id == q.session
+                            && s.generation == q.generation
+                            && target.as_ref().is_none_or(|id| id == &s.id)
+                            && terminals.as_ref().is_none_or(|terminals| {
+                                s.terminal.as_ref().is_some_and(|t| terminals.contains(t))
+                            })
+                    })
+                })
                 .collect();
-            if matches.len() != 1 {
-                bail!("请使用问卷消息中的 /answer qID 回答");
+            if candidates.len() != 1 {
+                bail!("没有唯一的待回答问卷，请使用问卷消息中的 /answer qID 回答。");
             }
-            (matches[0].0.clone(), args.to_string())
+            candidates[0].0.clone()
         };
         let q = self
             .questions
             .get(&reference)
             .context("问卷已关闭或编号无效")?;
+        self.reply_source = Some(q.session.clone());
         let s = self
             .hub
             .session(&q.session)
             .await
             .filter(|s| s.generation == q.generation)
             .context("问卷来源 Pi 已离线")?;
+        self.reply_source = Some(s.id.clone());
+        if question_id && (explicit.is_some() || quote.is_some()) {
+            let target = self.target(explicit, quote).await?;
+            if target.id != s.id {
+                bail!("问卷编号与指定 Pi 不同，回答未发送。");
+            }
+        }
         let questions = q.payload["questions"].as_array().context("问卷无效")?;
         let mut action = json!({"action":"answer","toolCallId":q.payload["toolCallId"]});
         if command == "cancel" {
@@ -820,7 +1057,7 @@ impl Router {
             let body = if command == "pick" {
                 body.split_whitespace().next().unwrap_or_default()
             } else {
-                &body
+                body
             };
             action["answers"] = parse_answers(questions, body)?;
         }
@@ -887,6 +1124,12 @@ fn parse_answers(questions: &[Value], text: &str) -> Result<Value> {
         }
     }
     Ok(json!(answers))
+}
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 fn page(arg: &str, count: usize, size: usize) -> Result<(usize, usize, usize)> {
     let pages = count.div_ceil(size).max(1);

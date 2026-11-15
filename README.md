@@ -34,7 +34,11 @@
 
 `/commands` 展示 Model、Thinking、Compact、Reload、All cmds、Status、Approvals、Peek 八个入口。`/commands 1` 和 `/model [页码]` 每页最多显示 12 项；命令点选后预填输入框，可追加参数，模型与 Thinking 可直接选择，当前项有标记。选项、翻页及状态入口都绑定到来源 Pi。`/help commands` 提供详细用法。修改模型/Thinking、`/compact [补充要求]`、`/reload`、`/pi 命令 参数` 需要 Pi 空闲，重载会等待同一 Pi 重新连接后再确认完成。
 
-QQ 普通消息、`/to sN 内容`、`/steer 内容` 和带附件的消息都沿用原桥接的 Steer 行为，忙碌时作为当前任务反馈；Pi 空闲时正常开始下一轮。
+QQ 普通消息、`/to sN 内容`、`/steer 内容` 和带附件的消息都沿用原桥接的 Steer 行为，忙碌时作为当前任务反馈；Pi 空闲时正常开始下一轮。切换工作区会同步当前会话，选择一个 Pi 也会同步所属工作区。
+
+问卷支持 `/answer qID 2`、`/answer sN 2`、`/answer 2` 和 `answer 2`；没有选中 Pi 时，只在当前工作区（或未选工作区时全部在线 Pi）有唯一待回答问卷时接受简写。`/permissions` 可重新显示已有的待处理请求。附件与控制命令需要分开发送，避免忽略附件。
+
+`/new sN` 继承来源 Pi 的模型和 Thinking；新进程仍通过客户端已检测的本机 Pi 安装和配置启动。新建结果会持久等待扩展注册，首次等待超时后连接成功仍会补发通知；沿用原桥接的五分钟等待期限，不能据超时重复创建。
 
 图片支持 JPG/PNG/GIF/WebP/BMP，单张最多 30 MiB；视频支持 MP4/MOV/WebM/MKV/AVI，视频和文件最多 100 MiB。附件保存后作为本地路径提交给 Pi，不自动解析、执行或转码。
 

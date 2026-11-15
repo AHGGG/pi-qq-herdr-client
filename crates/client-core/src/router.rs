@@ -556,7 +556,17 @@ impl Router {
                 if prompt.trim().is_empty() {
                     bail!("消息为空");
                 }
-                let result=self.hub.action(&session,json!({"action":"prompt","text":prompt,"mode":if command=="steer"{"steer"}else{"followUp"}})).await?;
+                // QQ text is feedback to the active Pi turn. Keep ordinary messages,
+                // /to, and explicit /steer aligned with the legacy bridge: all use
+                // Pi's immediate steering queue. Follow-up delivery remains reserved
+                // for client-generated control commands in the Pi extension.
+                let result = self
+                    .hub
+                    .action(
+                        &session,
+                        json!({"action":"prompt","text":prompt,"mode":"steer"}),
+                    )
+                    .await?;
                 let note = match result["status"].as_str() {
                     Some("compacting") => "已排队，压缩完成后提交给 Pi。",
                     Some("submitted") => {

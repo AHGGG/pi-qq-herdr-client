@@ -57,7 +57,7 @@ impl ClientWindow {
         platform::set_window_icon(window);
         let image = image::load_from_memory(include_bytes!("../assets/pi-qq.png"))
             .expect("embedded application icon")
-            .resize_exact(32, 32, image::imageops::FilterType::Nearest)
+            .resize_exact(32, 32, image::imageops::FilterType::Lanczos3)
             .into_rgba8();
         let icon = tray_icon::Icon::from_rgba(image.into_raw(), 32, 32).expect("tray icon");
         let tray = TrayIconBuilder::new()

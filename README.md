@@ -64,7 +64,7 @@ cargo build --release -p pi-qq-herdr-client -j 4
 普通配置与运行状态默认放在 `%LOCALAPPDATA%/pi-qq-herdr-client`，QQ 授权保存在 `credentials.protected`，由 Windows DPAPI 保护。替换 EXE 或重新打包不影响绑定，在同一个 Windows 用户下启动即可复用。`PI_QQ_CLIENT_DIR` 可指定独立数据目录，`PI_CODING_AGENT_DIR` 决定配套扩展安装位置。调试时让客户端和 Pi 使用一致的环境变量。
 
 - `crates/client-core/`：QQ、Core、本机 Pi 桥接、路由与持久化。
-- `crates/desktop/`：原生窗口、二维码、托盘和桌面生命周期。`assets/` 内的原创黑白像素聊天企鹅用于 EXE、窗口和托盘；可用 `uv run --no-project --with pillow python scripts/generate-icon.py` 重新生成。
+- `crates/desktop/`：原生窗口、二维码、托盘和桌面生命周期。`assets/` 内的原创右下角探头卡通萌物图标用于 EXE、窗口和托盘；可用 `uv run --no-project --with pillow python scripts/generate-icon.py` 重新生成。
 - `integrations/pi/`：随 EXE 分发并安装到 Pi 的配套扩展，无额外 npm 依赖。
 
 开发先读 [AGENTS.md](AGENTS.md)。本机的 `docs/design.md`、`docs/implementation-handoff.md` 和 `docs/research/` 刻意加入 Git 忽略，不随克隆分发。

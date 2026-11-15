@@ -65,6 +65,18 @@ cargo build --release -p pi-qq-herdr-client -j 4
 
 本项目不编写或运行单元测试。交付检查使用 Rust 编译、扩展语法与格式检查；扫码、手机命令和桌面体验的整体运行验证由使用者完成。
 
+## GitHub 发布
+
+[发布 workflow](.github/workflows/release.yml) 只由 `workflow_dispatch` 手动触发。提交代码、推送 tag 和版本提交均不会自动运行它。
+
+1. 将 workflow 和源码推送到 GitHub；workflow 需要先出现在默认分支，Actions 页面才会显示手动运行入口。
+2. 打开 **Actions → Prepare Windows release → Run workflow**，选择源码分支及版本升级方式，默认 `patch`。例如当前 `0.1.0`，`patch` 升到 `0.1.1`，`minor` 升到 `0.2.0`，`major` 升到 `1.0.0`。可勾选 prerelease，将草稿标记为预发布。
+3. workflow 自动同步 `Cargo.toml`、`Cargo.lock` 中两个本地包的版本及 EXE 的 Windows 版本资源，然后构建 Windows x64 ZIP 和 SHA256 文件。构建成功后才将版本提交和 tag 一起推送回所选分支，不更新依赖版本、不覆盖已有 tag。
+4. workflow 创建 **Draft Release（草稿）**，上传 ZIP、SHA256 并生成发布说明。Actions 摘要提供草稿链接，构建产物也保留在该次运行的 Artifacts 中。草稿中的版本提交和 tag 已写入仓库，草稿不会向普通用户公开发布。
+5. 下载检查产物、编辑说明，确认后在 GitHub 点击 **Publish release**。workflow 在草稿处结束，正式发布由你确认。
+
+使用仓库自带的 `GITHUB_TOKEN`，无需单独配置发布密钥；所选分支必须允许 Actions 写入版本提交和 tag。若构建期间分支已有新提交，推送会失败，不会强行覆盖。当前可交付的平台为 **Windows x64**；macOS/Linux 尚缺可用的凭据保护实现，不生成这些平台的发布包。版本发布流程不会替换或重启本机正在运行的客户端。
+
 ## 数据与开发
 
 普通配置与运行状态默认放在 `%LOCALAPPDATA%/pi-qq-herdr-client`，QQ 授权保存在 `credentials.protected`，由 Windows DPAPI 保护。替换 EXE 或重新打包不影响绑定，在同一个 Windows 用户下启动即可复用。`PI_QQ_CLIENT_DIR` 可指定独立数据目录，`PI_CODING_AGENT_DIR` 决定配套扩展安装位置。调试时让客户端和 Pi 使用一致的环境变量。

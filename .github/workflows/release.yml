@@ -1,0 +1,132 @@
+name: Prepare Windows release
+run-name: Prepare ${{ inputs.bump }} release from ${{ github.ref_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version increment (patch: 0.1.0 → 0.1.1, minor: → 0.2.0, major: → 1.0.0)"
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+      prerelease:
+        description: "Mark the draft as a prerelease"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prepare-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Check out selected commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Require a source branch
+        run: |
+          if ($env:GITHUB_REF_TYPE -ne 'branch') {
+            throw 'Run this workflow on a branch so the version update can be committed.'
+          }
+
+      - name: Bump Cargo and Windows versions
+        id: version
+        env:
+          VERSION_BUMP: ${{ inputs.bump }}
+        run: |
+          python ./scripts/bump-version.py $env:VERSION_BUMP
+          if ($LASTEXITCODE -ne 0) { throw 'Version update failed.' }
+
+      - name: Refuse an existing tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          $refs = @(gh api "repos/$env:GITHUB_REPOSITORY/git/matching-refs/tags/$env:RELEASE_TAG" --jq '.[].ref')
+          if ($LASTEXITCODE -ne 0) { throw 'Could not check existing release tags.' }
+          if ($refs -ccontains "refs/tags/$env:RELEASE_TAG") {
+            throw "Tag $env:RELEASE_TAG already exists. Existing releases are never overwritten."
+          }
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build and package Windows x64
+        run: ./scripts/build.ps1
+
+      - name: Preserve release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pi-qq-herdr-client-${{ steps.version.outputs.tag }}-windows-x64
+          path: |
+            dist/pi-qq-herdr-client-windows-x64.zip
+            dist/pi-qq-herdr-client-windows-x64.zip.sha256
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Commit version and tag after successful build
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_BRANCH: ${{ github.ref_name }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Cargo.toml Cargo.lock crates/desktop/assets/app.rc
+          if ($LASTEXITCODE -ne 0) { throw 'Could not stage version files.' }
+          git commit -m "chore: release $env:RELEASE_TAG"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not commit the version update.' }
+          git tag -a $env:RELEASE_TAG -m "Release $env:RELEASE_TAG"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not create the release tag.' }
+          git push --atomic origin "HEAD:refs/heads/$env:RELEASE_BRANCH" "refs/tags/$env:RELEASE_TAG"
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not push the version and tag. Check branch permissions or concurrent source changes.'
+          }
+
+      - name: Create draft release for review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          $releaseArgs = @(
+            'release', 'create', $env:RELEASE_TAG,
+            'dist/pi-qq-herdr-client-windows-x64.zip',
+            'dist/pi-qq-herdr-client-windows-x64.zip.sha256',
+            '--repo', $env:GITHUB_REPOSITORY,
+            '--verify-tag',
+            '--title', $env:RELEASE_TAG,
+            '--generate-notes',
+            '--draft'
+          )
+          if ($env:RELEASE_PRERELEASE -eq 'true') { $releaseArgs += '--prerelease' }
+          $releaseUrl = gh @releaseArgs
+          if ($LASTEXITCODE -ne 0) { throw 'Could not create the draft release. Build artifacts are available in this Actions run.' }
+          @(
+            "Draft release: $releaseUrl",
+            '',
+            'Download and check the ZIP, edit release notes if needed, then click **Publish release** on GitHub.',
+            'This workflow leaves the release as a draft; it does not publish it.'
+          ) | Add-Content -Path $env:GITHUB_STEP_SUMMARY -Encoding utf8

@@ -476,7 +476,7 @@ impl ClientWindow {
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
                         .child(format!(
-                            "QQ、Herdr 已就绪 · 已连接 {} 个 Pi 会话",
+                            "QQ、Herdr 已就绪 · 已连接 {} 个 Session",
                             self.snapshot.connected_sessions
                         )),
                 )
@@ -488,7 +488,7 @@ impl ClientWindow {
                 .child(guide_step(
                     "已有 Pi",
                     "/sessions",
-                    "选择一个会话，再直接发送任务。",
+                    "选择一个 Session，再直接发送任务。",
                     cx,
                 ))
                 .child(guide_step(

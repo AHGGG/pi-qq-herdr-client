@@ -16,7 +16,7 @@ use std::{
 };
 use tokio::sync::RwLock;
 
-const HELP: &str = "Pi QQ\n\n/workspaces · 选择工作区\n/sessions [all] [页码] · 查看 Pi\n/use sN · 选择会话\n/new [sN] · 新建 Pi（没有会话也可创建）\n/name [sN] 名称 · 重命名\n/status · 当前会话状态\n/peek [sN] · 查看当前终端\n/stop · 停止任务\n/close [sN] · 确认后关闭 Pi\n\n/commands · Pi 控制\n/model、/thinking、/compact、/reload\n/pi 命令 参数 · 已安装 Pi 命令\n/to sN 内容 · 指定会话\n/steer 内容 · 反馈当前任务\n\n/answer qID 1 · 回答问卷\n/answer qID 1,2;=文字 · 多选/多题\n/cancel qID · 取消问卷\n/permissions · 等待中的权限\n/approve pID、/deny pID [原因]\n\n普通消息会发给选中的 Pi。引用通知回复可以继续原会话；支持图片、视频、文件。/stop 保留 Pi，/close 才关闭终端。";
+const HELP: &str = "Pi QQ\n\n/workspaces · Workspaces 列表\n/sessions [all] [页码] · Sessions 列表\n/use sN · 选择 Session\n/new [sN] · 新建 Pi（没有在线 Pi 也可创建）\n/name [sN] 名称 · 重命名 Session\n/status · 当前 Session 状态\n/peek [sN] · 查看当前输出\n/stop · 停止任务\n/close [sN] · 确认后关闭 Pi\n\n/commands · 模型与命令\n/model、/thinking、/compact、/reload\n/pi 命令 参数 · 已安装 Pi 命令\n/to sN 内容 · 指定 Session\n/steer 内容 · 反馈当前任务\n\n/answer qID 1 · 回答问卷\n/answer qID 1,2;=文字 · 多选/多题\n/cancel qID · 取消问卷\n/permissions · 等待中的权限\n/approve pID、/deny pID [原因]\n\n普通消息会发给选中的 Pi。引用通知回复可以继续原 Session；支持图片、视频、文件。/stop 保留 Pi，/close 才关闭终端。";
 
 struct Interaction {
     session: String,
@@ -132,7 +132,7 @@ impl Router {
                 .find(|s| s.slot == slot)
                 .context("指定 Pi 已离线，请刷新 /sessions")?;
             if quoted.as_ref().is_some_and(|id| id != &session.id) {
-                bail!("指定会话与引用来源不同，请明确选择后重发");
+                bail!("指定 Session 与引用来源不同，请明确选择后重发");
             }
             return Ok(session.clone());
         }
@@ -149,7 +149,7 @@ impl Router {
                 .workspaces
                 .iter()
                 .find(|w| w.key == key)
-                .context("选中的工作区已不可用，请重新发送 /workspaces 选择")?;
+                .context("选中的 Workspace 已不可用，请重新发送 /workspaces 选择")?;
             Some(workspace.terminals.clone())
         } else {
             None
@@ -165,9 +165,9 @@ impl Router {
             let session = sessions
                 .iter()
                 .find(|s| s.id == id)
-                .context("原会话已离线。请发送 /sessions 重新选择；消息没有发给其他 Pi")?;
+                .context("原 Session 已离线。请发送 /sessions 重新选择；消息没有发给其他 Pi")?;
             if !in_workspace(session) {
-                bail!("选中的 Pi 不在当前工作区，请发送 /sessions 重新选择，消息未发送。");
+                bail!("选中的 Session 不在当前 Workspace，请发送 /sessions 重新选择，消息未发送。");
             }
             return Ok(session.clone());
         }
@@ -177,7 +177,7 @@ impl Router {
                 return Ok(session);
             }
         }
-        bail!("请先发送 /sessions 选择 Pi；没有会话时可发送 /new 创建")
+        bail!("请先发送 /sessions 选择 Session；没有在线 Pi 时可发送 /new 创建")
     }
     async fn workspaces(&self) -> Result<Vec<(String, Workspace)>> {
         let core = self.core().await?;
@@ -213,7 +213,7 @@ impl Router {
         let quote = qq::quoted_key(message);
         // A quote marker without a resolvable reference must never redirect silently.
         if message["message_type"] == 103 && quote.is_none() {
-            bail!("这条引用无法识别来源，请先 /use 选择会话");
+            bail!("这条引用无法识别来源，请先 /use 选择 Session");
         }
         let mut explicit = None;
         if text.starts_with("/to ") {
@@ -249,10 +249,10 @@ impl Router {
                         HELP,
                         None,
                         &[
-                            ("工作区", "/workspaces".into()),
-                            ("Pi 会话", "/sessions all".into()),
+                            ("Workspaces", "/workspaces".into()),
+                            ("Sessions", "/sessions all".into()),
                             ("新建 Pi", "/new".into()),
-                            ("手机控制用法", "/help commands".into()),
+                            ("命令用法", "/help commands".into()),
                         ],
                     )
                     .await;
@@ -262,7 +262,7 @@ impl Router {
                 let (page, pages, start) = page(&args, all.len(), 8)?;
                 let selected = self.hub.routes.lock().await.workspace.clone();
                 let sessions = self.hub.sessions().await;
-                let mut lines = vec![list_heading("工作区", all.len(), page, pages)];
+                let mut lines = vec![list_heading("Workspaces", all.len(), page, pages)];
                 for (slot, w) in all.iter().skip(start).take(8) {
                     let count = sessions
                         .iter()
@@ -276,14 +276,14 @@ impl Router {
                         &w.name,
                         &format!("/workspace {slot}"),
                         selected.as_ref() == Some(&w.key),
-                        &format!("{count} 个 Pi"),
+                        &format!("{count} 个 Session"),
                     ));
                 }
                 if all.is_empty() {
-                    lines.push("暂无 Herdr 工作区。可在 Herdr 中创建，或直接 /new，在用户主目录启动第一个 Pi。".into());
+                    lines.push("暂无 Herdr Workspace。可在 Herdr 中创建，或直接 /new，在用户主目录启动第一个 Pi。".into());
                 }
                 let mut buttons = pages_buttons("/workspaces", page, pages);
-                buttons.push(("全部 Pi", "/sessions all".into()));
+                buttons.push(("全部 Sessions", "/sessions all".into()));
                 return self.send(&lines.join("\n\n"), None, &buttons).await;
             }
             "workspace" => {
@@ -296,7 +296,7 @@ impl Router {
                     .await?
                     .into_iter()
                     .find(|(s, _)| s == slot)
-                    .context("工作区不存在，请刷新 /workspaces")?;
+                    .context("Workspace 不存在，请刷新 /workspaces")?;
                 let members: Vec<_> = self
                     .hub
                     .sessions()
@@ -317,11 +317,11 @@ impl Router {
                 return self
                     .send(
                         &format!(
-                            "已选择工作区：{}\n新会话将使用此工作区。",
+                            "已选择 Workspace：{}\n新建 Pi 将使用此 Workspace。",
                             clean(&w.name, 100)
                         ),
                         None,
-                        &[("Pi 会话", "/sessions".into()), ("新建 Pi", "/new".into())],
+                        &[("Sessions", "/sessions".into()), ("新建 Pi", "/new".into())],
                     )
                     .await;
             }
@@ -338,7 +338,7 @@ impl Router {
                         let core = self.core().await?;
                         let cat = core.catalog.read().await;
                         let w = cat.workspaces.iter().find(|w| w.key == key).context(
-                            "选中的工作区已不可用，请重新选择 /workspaces 或 /sessions all",
+                            "选中的 Workspace 已不可用，请重新选择 /workspaces 或 /sessions all",
                         )?;
                         sessions.retain(|s| {
                             s.terminal.as_ref().is_some_and(|t| w.terminals.contains(t))
@@ -346,7 +346,7 @@ impl Router {
                     }
                 }
                 let (page, pages, start) = page(page_arg, sessions.len(), 8)?;
-                let mut lines = vec![list_heading("Pi 会话", sessions.len(), page, pages)];
+                let mut lines = vec![list_heading("Sessions", sessions.len(), page, pages)];
                 for s in sessions.iter().skip(start).take(8) {
                     lines.push(selection_row(
                         &s.label,
@@ -360,7 +360,10 @@ impl Router {
                 }
                 let mut buttons =
                     pages_buttons(if all { "/sessions all" } else { "/sessions" }, page, pages);
-                buttons.extend([("工作区", "/workspaces".into()), ("新建 Pi", "/new".into())]);
+                buttons.extend([
+                    ("Workspaces", "/workspaces".into()),
+                    ("新建 Pi", "/new".into()),
+                ]);
                 return self.send(&lines.join("\n\n"), None, &buttons).await;
             }
             "use" => {
@@ -414,7 +417,7 @@ impl Router {
                         workspaces
                             .iter()
                             .find(|(_, w)| w.key == key)
-                            .context("工作区已不可用，请通过 /workspaces 重新选择")?
+                            .context("Workspace 已不可用，请通过 /workspaces 重新选择")?
                             .1
                             .clone(),
                     )
@@ -431,7 +434,7 @@ impl Router {
                 } else if workspaces.len() == 1 {
                     Some(workspaces[0].1.clone())
                 } else if workspaces.len() > 1 {
-                    let mut lines = vec!["请选择新 Pi 的工作区，选好后点击“新建 Pi”：".into()];
+                    let mut lines = vec!["请选择新 Pi 的 Workspace，选好后点击“新建 Pi”：".into()];
                     for (slot, workspace) in workspaces.iter().take(8) {
                         lines.push(selection_row(
                             &workspace.name,
@@ -444,7 +447,7 @@ impl Router {
                         .send(
                             &lines.join("\n\n"),
                             None,
-                            &[("全部工作区", "/workspaces".into())],
+                            &[("Workspaces", "/workspaces".into())],
                         )
                         .await;
                 } else {
@@ -496,7 +499,7 @@ impl Router {
                     }
                     tokio::time::sleep(Duration::from_millis(500)).await;
                 }
-                return self.send("终端已创建，但 Pi 扩展尚未确认连接。连接成功后会补发通知；可查看 /sessions 和 Herdr，请不要重复 /new。",None,&[("Pi 会话","/sessions all".into())]).await;
+                return self.send("终端已创建，但 Pi 扩展尚未确认连接。连接成功后会补发通知；可查看 /sessions 和 Herdr，请不要重复 /new。",None,&[("Sessions","/sessions all".into())]).await;
             }
             "answer" | "cancel" | "pick" => {
                 return self
@@ -559,7 +562,7 @@ impl Router {
                 self.session_send(
                     &session,
                     &format!(
-                        "当前终端\n{}",
+                        "当前输出（Pi 屏幕文字）\n{}",
                         clean(result["text"].as_str().unwrap_or("无法读取当前画面"), 7000)
                     ),
                     &navigation(&session),
@@ -573,7 +576,7 @@ impl Router {
                 }
                 self.session_send(
                     &session,
-                    "已请求停止当前任务，Pi 会话保留。",
+                    "已请求停止当前任务，Session 保留。",
                     &navigation(&session),
                 )
                 .await
@@ -1024,7 +1027,7 @@ impl Router {
                             .workspaces
                             .iter()
                             .find(|w| w.key == key)
-                            .context("工作区已不可用，请重新选择 /workspaces")?
+                            .context("Workspace 已不可用，请重新选择 /workspaces")?
                             .terminals
                             .clone(),
                     )
@@ -1184,10 +1187,10 @@ fn pages_buttons(command: &str, page: usize, pages: usize) -> Vec<(&'static str,
 }
 fn navigation(s: &Session) -> Vec<(&'static str, String)> {
     vec![
-        ("选择此 Pi", format!("/use {}", s.slot)),
-        ("Pi 控制", format!("/to {} /commands", s.slot)),
-        ("查看终端", format!("/peek {}", s.slot)),
-        ("会话列表", "/sessions".into()),
+        ("选择此 Session", format!("/use {}", s.slot)),
+        ("模型与命令", format!("/to {} /commands", s.slot)),
+        ("查看当前输出", format!("/peek {}", s.slot)),
+        ("Sessions", "/sessions".into()),
     ]
 }
 pub fn keyboard(buttons: &[(&str, String)]) -> Option<Value> {

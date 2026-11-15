@@ -72,7 +72,7 @@ impl Core {
             || !record["reason"].is_null()
             || record["pid"].as_u64().is_none()
         {
-            bail!("原 Pi 已退出或终端已恢复为 shell，请刷新会话");
+            bail!("原 Pi 已退出或终端已恢复为 shell，请刷新 Sessions");
         }
         let pid = session.pid as u64;
         let direct = record["pid"].as_u64() == Some(pid)
@@ -90,13 +90,13 @@ impl Core {
         source: Option<&Session>,
     ) -> Result<(String, u32)> {
         if !std::path::Path::new(cwd).is_dir() {
-            bail!("工作目录无效，请在 Herdr 中检查项目目录，或通过 /workspaces 重新选择工作区");
+            bail!("工作目录无效，请在 Herdr 中检查项目目录，或通过 /workspaces 重新选择 Workspace");
         }
         let mut labels = json!({"pi.qq-client": "1"});
         if let Some(key) = workspace {
             let catalog = self.catalog.read().await;
             if !catalog.workspaces.iter().any(|w| &w.key == key) {
-                bail!("工作区已变化，请重新发送 /workspaces");
+                bail!("Workspace 已变化，请重新发送 /workspaces");
             }
             labels["herdr.space"] = json!(key.id);
             labels["herdr.tab"] = json!(format!("tb{}", uuid::Uuid::new_v4().simple()));
@@ -305,7 +305,7 @@ async fn refresh(core: &Core) -> Result<()> {
                         .next()
                         .filter(|name| !name.is_empty())
                 })
-                .unwrap_or("未命名工作区");
+                .unwrap_or("未命名 Workspace");
             workspaces.push(Workspace {
                 key: WorkspaceId {
                     core_id: cat.core_id.clone(),

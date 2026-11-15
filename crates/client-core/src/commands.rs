@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use futures_util::future::try_join_all;
 use serde_json::{Value, json};
 
-pub(crate) const HELP: &str = "Pi 手机控制\n\n/commands · 打开 Model、Thinking、Compact、Reload、All cmds、Status、Approvals、Peek\n/commands 1 · 浏览已安装命令，每页最多 12 项\n/model [页码] · 浏览可用模型，每页最多 12 项\n/model PROVIDER/MODEL · 选择模型\n/thinking · 选择 Thinking 等级\n/thinking high · 设置等级（以模型实际支持为准）\n/compact [补充要求] · 整理上下文，随后通知结果\n/reload · 重载扩展并确认此 Pi 重新连接\n/pi 命令 参数 · 提交此 Pi 已安装的命令\n/status [sN] · 模型、状态与上下文\n/peek [sN] · 查看当前终端\n\n列表中的命令会先填入输入框，可添加参数后发送；模型和 Thinking 选项可直接选择。上一页、下一页、返回和状态按钮都绑定到原 Pi。\n\n模型与 Thinking 修改、压缩、重载和 /pi 需要 Pi 空闲。部分命令或弹窗仍需在 Pi 终端处理。\n\n/to sN /commands · 打开指定 Pi 的控制面板，不切换默认会话。";
+pub(crate) const HELP: &str = "模型与命令\n\n/commands · 打开 Model、Thinking、Compact、Reload、All cmds、Status、Approvals、Peek\n/commands 1 · 浏览已安装命令，每页最多 12 项\n/model [页码] · 浏览可用模型，每页最多 12 项\n/model PROVIDER/MODEL · 选择模型\n/thinking · 选择 Thinking 等级\n/thinking high · 设置等级（以模型实际支持为准）\n/compact [补充要求] · 整理上下文，随后通知结果\n/reload · 重载扩展并确认此 Pi 重新连接\n/pi 命令 参数 · 提交此 Pi 已安装的命令\n/status [sN] · 模型、状态与上下文\n/peek [sN] · 查看当前输出（Pi 屏幕文字）\n\n列表中的命令会先填入输入框，可添加参数后发送；模型和 Thinking 选项可直接选择。上一页、下一页、返回和状态按钮都绑定到原 Pi。\n\n模型与 Thinking 修改、压缩、重载和 /pi 需要 Pi 空闲。部分命令或弹窗仍需在 Pi 终端处理。\n\n/to sN /commands · 打开指定 Pi 的模型与命令，不切换当前 Session。";
 
 const SOURCE_PAGES_PER_VIEW: u64 = 4;
 const THINKING_LEVELS: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -64,7 +64,7 @@ pub(crate) async fn execute(hub: &Hub, session: &Session, name: &str, args: &str
         || (name == "commands" && !args.is_empty());
     let mut text = command_text(session, &result);
     if needs_choices && !result["view"].is_string() {
-        text.push_str("\n请在 Pi 空闲时重载，以加载此会话的选项按钮。");
+        text.push_str("\n请在 Pi 空闲时重载，以加载此 Session 的选项按钮。");
     }
     Ok(Reply {
         text,

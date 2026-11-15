@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 pub async fn configure(api: &Api, store: &Store) -> Result<()> {
     let current = api.request(reqwest::Method::GET, "/v2/menu", None).await?;
-    let existing = current["menu"]["items"]
+    let mut existing = current["menu"]["items"]
         .as_array()
         .cloned()
         .unwrap_or_default();
@@ -15,15 +15,16 @@ pub async fn configure(api: &Api, store: &Store) -> Result<()> {
         bail!("QQ 菜单格式变化，未修改原菜单");
     }
     let shortcuts = vec![
-        ("工作区", "/workspaces"),
-        ("Pi 会话", "/sessions"),
-        ("Pi 控制", "/commands"),
+        ("Workspaces", "/workspaces"),
+        ("Sessions", "/sessions"),
+        ("模型与命令", "/commands"),
         ("新建 Pi", "/new"),
         ("状态", "/status"),
         ("停止任务", "/stop"),
         ("关闭 Pi", "/close"),
         ("帮助", "/help"),
     ];
+    let renamed = refresh_labels(&mut existing);
     let mut commands = Vec::new();
     collect_commands(&existing, &mut commands);
     let additions: Vec<Value> = shortcuts
@@ -31,7 +32,7 @@ pub async fn configure(api: &Api, store: &Store) -> Result<()> {
         .filter(|(_, cmd)| !commands.iter().any(|c| c == cmd))
         .map(|(name, cmd)| json!({"type":"send_message","name":name,"send_message":cmd}))
         .collect();
-    if additions.is_empty() {
+    if additions.is_empty() && !renamed {
         return Ok(());
     }
     let mut items = existing;
@@ -63,6 +64,28 @@ pub async fn configure(api: &Api, store: &Store) -> Result<()> {
         bail!("QQ 菜单提交后无法确认，请在手机查看；原菜单备份已保留");
     }
     Ok(())
+}
+// Only replace this client's old default labels; keep custom names and actions.
+fn refresh_labels(items: &mut [Value]) -> bool {
+    let mut changed = false;
+    for item in items {
+        if item["type"] == "send_message" {
+            let label = match (item["send_message"].as_str(), item["name"].as_str()) {
+                (Some("/workspaces"), Some("工作区")) => Some("Workspaces"),
+                (Some("/sessions"), Some("Pi 会话")) => Some("Sessions"),
+                (Some("/commands"), Some("Pi 控制")) => Some("模型与命令"),
+                _ => None,
+            };
+            if let Some(label) = label {
+                item["name"] = json!(label);
+                changed = true;
+            }
+        }
+        if let Some(children) = item["sub_menu_items"].as_array_mut() {
+            changed |= refresh_labels(children);
+        }
+    }
+    changed
 }
 fn collect_commands(items: &[Value], result: &mut Vec<String>) {
     for item in items {

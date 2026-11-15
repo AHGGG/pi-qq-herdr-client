@@ -407,7 +407,7 @@ async fn run(
 
 async fn send_guide(outbox: &Outbox, resend: bool) -> Result<()> {
     outbox.welcome(
-        "Pi QQ 已连接\n\n你已与这台电脑连接，接下来就在这个机器人私聊中操作：\n\n已有 Pi：发送 /sessions，选择会话后直接发消息。\n新建 Pi：发送 /new，等创建成功后再发送任务。\n全部用法：发送 /help。\n\n电脑上的 Pi QQ 客户端需要保持运行。关闭窗口会驻留托盘，选择退出才会断开连接。",
+        "Pi QQ 已连接\n\n你已与这台电脑连接，接下来就在这个机器人私聊中操作：\n\n已有 Pi：发送 /sessions，选择 Session 后直接发消息。\n新建 Pi：发送 /new，等创建成功后再发送任务。\n全部用法：发送 /help。\n\n电脑上的 Pi QQ 客户端需要保持运行。关闭窗口会驻留托盘，选择退出才会断开连接。",
         crate::router::keyboard(&[
             ("已有 Pi", "/sessions".into()),
             ("新建 Pi", "/new".into()),

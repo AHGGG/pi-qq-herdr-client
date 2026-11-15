@@ -118,7 +118,7 @@ impl Hub {
         let sender = peers
             .get(&session.id)
             .filter(|p| p.session.generation == session.generation)
-            .context("原 Pi 已离线或重新连接，请刷新会话")?
+            .context("原 Pi 已离线或重新连接，请刷新 Sessions")?
             .sender
             .clone();
         drop(peers);

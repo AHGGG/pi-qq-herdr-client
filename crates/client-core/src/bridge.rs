@@ -1,7 +1,7 @@
 use crate::{
     media,
     model::{Durable, PROTOCOL, Session},
-    outbox::Outbox,
+    outbox::{Delivery, Outbox},
     store::Store,
 };
 use anyhow::{Context, Result, anyhow, bail};
@@ -281,7 +281,14 @@ impl Hub {
                 );
                 let receipt = self
                     .outbox
-                    .enqueue(None, &text, Some(&session.id), None, false, attachment)
+                    .enqueue(
+                        Delivery::Notification,
+                        &text,
+                        Some(&session.id),
+                        None,
+                        false,
+                        attachment,
+                    )
                     .await?;
                 Ok(Some(receipt))
             }

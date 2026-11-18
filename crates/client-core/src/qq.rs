@@ -206,12 +206,16 @@ impl Api {
         bail!("QQ 授权已失效，请重新绑定")
     }
     pub async fn send(&self, owner: &str, body: Value) -> Result<Value> {
-        self.request(
-            Method::POST,
-            &format!("/v2/users/{}/messages", path_segment(owner)?),
-            Some(body),
+        tokio::time::timeout(
+            Duration::from_secs(20),
+            self.request(
+                Method::POST,
+                &format!("/v2/users/{}/messages", path_segment(owner)?),
+                Some(body),
+            ),
         )
         .await
+        .context("QQ 消息发送未确认，请检查连接和发送状态")?
     }
     pub async fn upload(&self, owner: &str, body: Value) -> Result<Value> {
         self.request(

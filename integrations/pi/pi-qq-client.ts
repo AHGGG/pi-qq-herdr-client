@@ -27,7 +27,6 @@ export default function qqRemote(pi) {
   let completedDelivery;
   let hadWork = false;
   let muted = false;
-  let disconnectedWarningShown = false;
   let forwardingGeneration = 0;
   let customName = '';
   let subscriptions = [];
@@ -90,21 +89,22 @@ export default function qqRemote(pi) {
     updateSessionName();
   };
 
-  async function notify(text, { imagePath, videoPath, filePath } = {}) {
+  async function notify(text, { imagePath, videoPath, filePath, automatic = false } = {}) {
     if (!connection) throw new Error('QQ_SESSION_DISABLED: run /qq on');
-    return connection.call({ type: 'notify', text, ...(imagePath ? { imagePath } : {}), ...(videoPath ? { videoPath } : {}), ...(filePath ? { filePath } : {}) },
+    const receipt = await connection.call({ type: 'notify', text, ...(imagePath ? { imagePath } : {}), ...(videoPath ? { videoPath } : {}), ...(filePath ? { filePath } : {}) },
       { timeout: imagePath || videoPath || filePath ? 30_000 : 6000 });
+    if (receipt.state === 'skipped' && !automatic) throw new Error('QQ 未连接，消息没有发送。请恢复连接后重试。');
+    return receipt;
   }
 
   function fireNotice(text) {
-    return notify(text).then(() => true, (error) => {
+    // An intentionally discarded offline notice is handled; do not replay its
+    // text later through agent_settled's fallback or show an enqueue warning.
+    if (!connection?.slot) return Promise.resolve(true);
+    return notify(text, { automatic: true }).then(() => true, (error) => {
+      if (!connection?.slot) return true;
       pi.appendEntry('pi-qq-client-unsent', { text, error: error.message, timestamp: Date.now() });
-      if (connection?.slot) {
-        report(`QQ 通知未入队：${error.message}。请查看 Pi QQ 客户端的连接状态；此条消息仍可在终端查看。`, 'warning');
-      } else if (!disconnectedWarningShown) {
-        disconnectedWarningShown = true;
-        report('QQ 通知未入队：请打开并保持 Pi QQ 桌面客户端运行，扩展会自动重连。此条消息尚未发送，请在终端查看。', 'warning');
-      }
+      report(`QQ 通知未入队：${error.message}。请查看 Pi QQ 客户端的连接状态；此条消息仍可在终端查看。`, 'warning');
       return false;
     });
   }
@@ -207,7 +207,6 @@ export default function qqRemote(pi) {
         if (ownGeneration !== generation) return;
         if (ctx.hasUI) ctx.ui.setStatus('pi-qq-client', state === 'connected' ? `Pi QQ ${current.slot}` : 'Pi QQ 等待桌面客户端');
         if (state === 'connected') {
-          disconnectedWarningShown = false;
           if (registration?.name) applySessionName(registration.name);
           syncState();
           for (const payload of questions.values()) current.send({ type: 'question_open', ...payload });
@@ -292,11 +291,11 @@ export default function qqRemote(pi) {
       ? 'Automatic QQ text forwarding is off for this session. qq_send is unavailable until /qq on enables the connection.'
       : muted
         ? 'Automatic QQ text forwarding is muted by /qq mute. Do not use qq_send merely to bypass that preference; explicitly requested messages remain available.'
-        : `Automatic QQ text forwarding is enabled${connection.slot ? '' : ', but the bridge is currently reconnecting and cannot confirm enqueueing'}.`;
+        : `Automatic QQ text forwarding is enabled${connection.slot ? '' : ', but the bridge is currently reconnecting; notifications are discarded while disconnected'}.`;
     event.systemPromptOptions.sections.qq_remote = [
       status,
-      'When enabled, the extension queues the visible text from each completed assistant message (message_end), including intermediate updates and the final reply. Write these messages normally; do not duplicate their text with qq_send or the CLI. Text over 5500 characters is shortened with a terminal hint.',
-      'A separate completion notice is queued once Pi fully settles (agent_settled), after retries, compaction retries and queued continuations finish. It does not repeat a reply already confirmed in the durable queue; a final reply not confirmed in the queue is included in the completion notice.',
+      'While QQ is connected, the extension queues the visible text from each completed assistant message (message_end), including intermediate updates and the final reply. Notifications produced while QQ is disconnected are discarded and are not replayed on reconnect. Write these messages normally; do not duplicate their text with qq_send or the CLI. Text over 5500 characters is shortened with a terminal hint.',
+      'While connected, a separate completion notice is queued once Pi fully settles (agent_settled), after retries, compaction retries and queued continuations finish. It does not repeat a reply already queued or intentionally discarded while offline; a final reply that failed to enqueue for another reason is included in the completion notice.',
       'Thinking and tool output are not automatically forwarded. Use qq_send for a separately requested message or attachment. Its imagePath, videoPath or filePath uploads a local file; automatic forwarding sends text only. Supported questionnaires and terminal confirmation notices are forwarded separately while the connection is enabled.',
       'Incoming QQ attachments are saved unchanged under the system temporary directory and arrive as absolute file paths. Generic files retain a safe original filename. The Harness and Agent choose how to process them; the bridge does not parse, unpack or execute files, extract frames, transcode video or transcribe audio.',
       'Automatic forwarding requires a working connection at completion. A queue receipt is not proof of a phone notification; do not claim delivery without evidence.',
@@ -402,7 +401,7 @@ export default function qqRemote(pi) {
 
   pi.registerTool({
     name: 'qq_send', label: 'QQ Send',
-    description: 'Send authorized text or one local attachment to the paired QQ owner. Supply text and/or one of imagePath, videoPath, filePath; path fields are mutually exclusive. Images: JPG, PNG, GIF, WebP, BMP; up to 30 MiB. Videos: MP4, MOV, WebM, MKV, AVI; up to 100 MiB. filePath sends any file as a downloadable attachment, up to 100 MiB, preserving a safe filename. Paths are relative to the current project or absolute. Enabled automatic forwarding queues each completed assistant message, including progress and final text, then a completion notice once Pi fully settles (agent_settled). Do not duplicate automatically forwarded text with qq_send. Attachments require explicit sending. Returns a durable queue receipt, not proof of a phone notification. Text limit: 19000 characters.',
+    description: 'Send authorized text or one local attachment to the paired QQ owner while QQ is connected. Supply text and/or one of imagePath, videoPath, filePath; path fields are mutually exclusive. Images: JPG, PNG, GIF, WebP, BMP; up to 30 MiB. Videos: MP4, MOV, WebM, MKV, AVI; up to 100 MiB. filePath sends any file as a downloadable attachment, up to 100 MiB, preserving a safe filename. Paths are relative to the current project or absolute. Enabled automatic forwarding queues each completed assistant message, including progress and final text, then a completion notice once Pi fully settles (agent_settled). Offline notifications are discarded without replay. Do not duplicate automatically forwarded text with qq_send. Attachments require explicit sending. Returns a queue receipt, not proof of a phone notification. Text limit: 19000 characters.',
     promptSnippet: 'Send authorized QQ messages or attachments; enabled automatic forwarding handles completed assistant text and task completion.',
     parameters: { type: 'object', properties: {
       text: { type: 'string', minLength: 1, maxLength: 19000 },

@@ -8,7 +8,10 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{Mutex, Notify, mpsc, watch};
@@ -25,6 +28,43 @@ impl Binding {
     pub fn scope(&self) -> String {
         format!("{}:{}", self.app_id, self.owner)
     }
+}
+pub struct ReplyContext {
+    message_id: String,
+    expires_at: u64,
+    next_sequence: AtomicU32,
+}
+impl ReplyContext {
+    pub fn new(message_id: &str) -> Self {
+        Self {
+            message_id: message_id.into(),
+            // Stay within QQ's documented five-minute reply window.
+            expires_at: now() + 240,
+            next_sequence: AtomicU32::new(1),
+        }
+    }
+    fn allocate(&self, parts: usize) -> Reply {
+        Reply {
+            message_id: self.message_id.clone(),
+            expires_at: self.expires_at,
+            sequence: self
+                .next_sequence
+                .fetch_add(parts as u32, Ordering::Relaxed),
+        }
+    }
+}
+pub enum Delivery<'a> {
+    Notification,
+    Interactive {
+        scope: Option<&'a str>,
+        reply: Option<&'a ReplyContext>,
+    },
+}
+#[derive(Clone, Serialize, Deserialize)]
+struct Reply {
+    message_id: String,
+    expires_at: u64,
+    sequence: u32,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -54,6 +94,24 @@ struct Record {
     next_attempt: u64,
     failed: bool,
     error: Option<String>,
+    #[serde(default)]
+    interactive: bool,
+    #[serde(default)]
+    reply: Option<Reply>,
+}
+impl Record {
+    fn passive_reply(&self) -> Option<(&str, u32)> {
+        let reply = self.reply.as_ref()?;
+        let sequence = reply.sequence + self.cursor as u32;
+        (now() < reply.expires_at && sequence <= 4).then_some((reply.message_id.as_str(), sequence))
+    }
+    fn address(&self, mut body: Value) -> Value {
+        if let Some((message_id, sequence)) = self.passive_reply() {
+            body["msg_id"] = json!(message_id);
+            body["msg_seq"] = json!(sequence);
+        }
+        body
+    }
 }
 #[derive(Clone)]
 pub struct Outbox {
@@ -61,6 +119,7 @@ pub struct Outbox {
     store: Store,
     binding: watch::Receiver<Option<Binding>>,
     notify: Arc<Notify>,
+    next_proactive: Arc<Mutex<tokio::time::Instant>>,
 }
 pub struct Accepted {
     pub scope: String,
@@ -73,18 +132,39 @@ impl Outbox {
         binding: watch::Receiver<Option<Binding>>,
         accepted: mpsc::Sender<Accepted>,
     ) -> Result<Self> {
+        let mut saved: Saved = store.load("outbox.json")?;
+        // A process restart is also an outage. Never replay an old pending queue.
+        if !saved.pending.is_empty() {
+            saved.pending.clear();
+            if saved.welcome.as_ref().is_some_and(|w| !w.accepted) {
+                saved.welcome = None;
+            }
+            store.save("outbox.json", &saved)?;
+        }
         let outbox = Self {
-            saved: Arc::new(Mutex::new(store.load("outbox.json")?)),
+            saved: Arc::new(Mutex::new(saved)),
             store,
             binding,
             notify: Arc::new(Notify::new()),
+            next_proactive: Arc::new(Mutex::new(tokio::time::Instant::now())),
         };
-        tokio::spawn(outbox.clone().worker(accepted));
+        tokio::spawn(outbox.clone().worker(accepted.clone(), false));
+        tokio::spawn(outbox.clone().worker(accepted, true));
         Ok(outbox)
+    }
+    pub async fn discard_pending(&self) -> Result<()> {
+        let mut state = self.saved.lock().await;
+        state.pending.clear();
+        if state.welcome.as_ref().is_some_and(|w| !w.accepted) {
+            state.welcome = None;
+        }
+        self.store.save("outbox.json", &*state)?;
+        self.notify.notify_waiters();
+        Ok(())
     }
     pub async fn enqueue(
         &self,
-        expected_scope: Option<&str>,
+        delivery: Delivery<'_>,
         text: &str,
         source: Option<&str>,
         keyboard: Option<Value>,
@@ -99,15 +179,39 @@ impl Outbox {
             .borrow()
             .clone()
             .context("请先在桌面完成 QQ 授权和用户配对")?;
+        let (interactive, expected_scope, reply) = match delivery {
+            Delivery::Notification => (false, None, None),
+            Delivery::Interactive { scope, reply } => (true, scope, reply),
+        };
         if expected_scope.is_some_and(|scope| scope != binding.scope()) {
             bail!("QQ 绑定已改变，此操作的回执不会发给新账号");
         }
         let mut state = self.saved.lock().await;
-        if state.pending.len() >= 100 {
+        if !self
+            .binding
+            .borrow()
+            .as_ref()
+            .is_some_and(|b| b.ready && b.scope() == binding.scope())
+        {
+            if interactive {
+                bail!("QQ 已断开，回复未发送，请恢复连接后重试");
+            }
+            return Ok(json!({"state":"skipped","reason":"offline"}));
+        }
+        // Notifications cannot consume the slots reserved for command replies.
+        let limit = if interactive { 20 } else { 100 };
+        if state
+            .pending
+            .iter()
+            .filter(|r| r.interactive == interactive)
+            .count()
+            >= limit
+        {
             bail!("待发队列已满，请在桌面检查发送状态");
         }
         let id = Uuid::new_v4().to_string();
         let parts = text_parts(text);
+        let reply = reply.map(|r| r.allocate(parts.len() + usize::from(attachment.is_some())));
         state.pending.push(Record {
             id: id.clone(),
             scope: binding.scope(),
@@ -122,12 +226,14 @@ impl Outbox {
             next_attempt: 0,
             failed: false,
             error: None,
+            interactive,
+            reply,
         });
         if let Err(e) = self.store.save("outbox.json", &*state) {
             state.pending.pop();
             return Err(e);
         }
-        self.notify.notify_one();
+        self.notify.notify_waiters();
         Ok(json!({"deliveryId":id,"state":"queued"}))
     }
     pub async fn welcome(&self, text: &str, keyboard: Option<Value>, resend: bool) -> Result<()> {
@@ -150,11 +256,11 @@ impl Outbox {
                 record.next_attempt = 0;
                 record.error = None;
                 self.store.save("outbox.json", &*state)?;
-                self.notify.notify_one();
+                self.notify.notify_waiters();
                 return Ok(());
             }
         }
-        if state.pending.len() >= 100 {
+        if state.pending.iter().filter(|r| r.interactive).count() >= 20 {
             bail!("待发队列已满，请在设置中检查发送状态");
         }
         let id = Uuid::new_v4().to_string();
@@ -172,6 +278,8 @@ impl Outbox {
             next_attempt: 0,
             failed: false,
             error: None,
+            interactive: true,
+            reply: None,
         });
         let previous = state.welcome.replace(Welcome {
             scope,
@@ -183,7 +291,7 @@ impl Outbox {
             state.welcome = previous;
             return Err(error);
         }
-        self.notify.notify_one();
+        self.notify.notify_waiters();
         Ok(())
     }
     pub async fn guide_status(&self) -> GuideStatus {
@@ -219,7 +327,7 @@ impl Outbox {
             record.next_attempt = 0;
         }
         self.store.save("outbox.json", &*state)?;
-        self.notify.notify_one();
+        self.notify.notify_waiters();
         Ok(())
     }
     pub async fn summary(&self) -> Value {
@@ -247,24 +355,58 @@ impl Outbox {
             })
             .collect()
     }
-    async fn worker(self, accepted: mpsc::Sender<Accepted>) {
+    async fn worker(self, accepted: mpsc::Sender<Accepted>, interactive: bool) {
+        let mut binding_events = self.binding.clone();
         loop {
-            let ready = self.binding.borrow().clone().filter(|b| b.ready);
+            let ready = binding_events
+                .borrow_and_update()
+                .clone()
+                .filter(|b| b.ready);
             let next = {
                 let state = self.saved.lock().await;
                 state
                     .pending
                     .iter()
-                    .find(|r| !r.failed && r.next_attempt <= now())
+                    .find(|r| r.interactive == interactive && !r.failed && r.next_attempt <= now())
                     .cloned()
             };
             if let (Some(binding), Some(record)) = (ready, next) {
+                if record.passive_reply().is_none() {
+                    // Both lanes share QQ's proactive limit. Passive command replies
+                    // bypass this wait and are not blocked by a notification upload.
+                    let mut next = self.next_proactive.lock().await;
+                    tokio::time::sleep_until(*next).await;
+                    *next = tokio::time::Instant::now() + Duration::from_millis(3100);
+                }
+                let still_ready = self
+                    .binding
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|b| b.ready && b.scope() == binding.scope());
+                let still_pending = self
+                    .saved
+                    .lock()
+                    .await
+                    .pending
+                    .iter()
+                    .any(|r| r.id == record.id && r.cursor == record.cursor);
+                if !still_ready || !still_pending {
+                    continue;
+                }
                 let result = if record.scope != binding.scope() {
                     Err(anyhow::anyhow!("QQ 绑定已改变，旧消息不会发送给新账号"))
                 } else {
-                    send_record(&binding.api, &record).await
+                    tokio::select! {
+                        biased;
+                        changed = binding_events.changed() => {
+                            if changed.is_err() { return; }
+                            continue;
+                        },
+                        result = send_record(&binding.api, &record) => result,
+                    }
                 };
                 let mut state = self.saved.lock().await;
+                let mut accepted_source = None;
                 if let Some(index) = state
                     .pending
                     .iter()
@@ -310,13 +452,11 @@ impl Outbox {
                                 }
                             }
                             if let Some(source) = record.source {
-                                let _ = accepted
-                                    .send(Accepted {
-                                        scope: record.scope,
-                                        source,
-                                        references,
-                                    })
-                                    .await;
+                                accepted_source = Some(Accepted {
+                                    scope: record.scope,
+                                    source,
+                                    references,
+                                });
                             }
                         }
                         Err(error) => {
@@ -333,9 +473,18 @@ impl Outbox {
                     }
                 }
                 drop(state);
-                tokio::time::sleep(Duration::from_millis(3100)).await;
+                // Never await channel capacity while holding the queue lock: the
+                // receiver may itself be waiting to enqueue a command reply.
+                if let Some(source) = accepted_source {
+                    let _ = accepted.send(source).await;
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
             } else {
-                tokio::select! { _ = self.notify.notified() => {}, _ = tokio::time::sleep(Duration::from_secs(1)) => {} }
+                tokio::select! {
+                    _ = self.notify.notified() => {},
+                    _ = binding_events.changed() => {},
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {},
+                }
             }
         }
     }
@@ -376,7 +525,7 @@ async fn send_record(api: &Api, record: &Record) -> Result<Vec<String>> {
                     body["keyboard"] = keyboard.clone();
                 }
             }
-            match api.send(&record.owner, body).await {
+            match api.send(&record.owner, record.address(body)).await {
                 Ok(reply) => reply,
                 Err(error) => {
                     let reason = error.to_string();
@@ -390,7 +539,8 @@ async fn send_record(api: &Api, record: &Record) -> Result<Vec<String>> {
                     }
                     api.send(
                         &record.owner,
-                        json!({"msg_type":0,"content":plain_text(text),"msg_seq":1}),
+                        record
+                            .address(json!({"msg_type":0,"content":plain_text(text),"msg_seq":1})),
                     )
                     .await?
                 }
@@ -398,7 +548,7 @@ async fn send_record(api: &Api, record: &Record) -> Result<Vec<String>> {
         } else {
             api.send(
                 &record.owner,
-                json!({"msg_type":0,"content":text,"msg_seq":1}),
+                record.address(json!({"msg_type":0,"content":text,"msg_seq":1})),
             )
             .await?
         }
@@ -407,7 +557,7 @@ async fn send_record(api: &Api, record: &Record) -> Result<Vec<String>> {
         let info = media::upload(api, &record.owner, attachment).await?;
         api.send(
             &record.owner,
-            json!({"msg_type":7,"media":{"file_info":info},"msg_seq":1}),
+            record.address(json!({"msg_type":7,"media":{"file_info":info},"msg_seq":1})),
         )
         .await?
     };

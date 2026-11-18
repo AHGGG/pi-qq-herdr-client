@@ -4,7 +4,7 @@ use crate::{
     herdr::Core,
     media,
     model::{PendingLaunch, Session, Workspace, clean},
-    outbox::Outbox,
+    outbox::{Delivery, Outbox, ReplyContext},
     qq,
 };
 use anyhow::{Context, Result, bail};
@@ -38,6 +38,7 @@ pub struct Router {
     permissions: HashMap<String, Interaction>,
     closes: HashMap<String, Close>,
     reply_source: Option<String>,
+    reply_context: Option<ReplyContext>,
 }
 impl Router {
     pub fn new(hub: Hub, outbox: Outbox, core: Arc<RwLock<Option<Core>>>) -> Self {
@@ -50,6 +51,13 @@ impl Router {
             permissions: HashMap::new(),
             closes: HashMap::new(),
             reply_source: None,
+            reply_context: None,
+        }
+    }
+    fn delivery(&self) -> Delivery<'_> {
+        Delivery::Interactive {
+            scope: self.expected_scope.as_deref(),
+            reply: self.reply_context.as_ref(),
         }
     }
     async fn send(
@@ -60,7 +68,7 @@ impl Router {
     ) -> Result<()> {
         self.outbox
             .enqueue(
-                self.expected_scope.as_deref(),
+                self.delivery(),
                 text,
                 source,
                 keyboard(buttons),
@@ -97,6 +105,7 @@ impl Router {
         }
         self.hub.save_routes().await?;
         self.reply_source = None;
+        self.reply_context = Some(ReplyContext::new(id));
         let result = self.route(http, &message).await;
         if let Err(error) = result {
             self.send(&format!("{}", error), self.reply_source.as_deref(), &[])
@@ -641,7 +650,7 @@ impl Router {
                 let reply = commands::execute(&self.hub, &session, &command, &args).await?;
                 self.outbox
                     .enqueue(
-                        self.expected_scope.as_deref(),
+                        self.delivery(),
                         &format!(
                             "[{} · {}]\n{}",
                             session.slot,
@@ -736,7 +745,10 @@ impl Router {
         };
         self.outbox
             .enqueue(
-                Some(&pending.scope),
+                Delivery::Interactive {
+                    scope: Some(&pending.scope),
+                    reply: self.reply_context.as_ref(),
+                },
                 &format!(
                     "[{} · {}]\n{text}",
                     session.slot,
@@ -784,6 +796,7 @@ impl Router {
             .await
     }
     pub async fn event(&mut self, event: BridgeEvent) -> Result<()> {
+        self.reply_context = None;
         match event {
             BridgeEvent::Registered(session) => {
                 self.complete_launch(&session, false).await?;

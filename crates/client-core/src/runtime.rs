@@ -159,10 +159,8 @@ async fn run(
                             snapshot.qq_ready = false;
                             snapshot.qr_url = None;
                             snapshot.qr_status = "连接已暂停".into();
-                            let binding = binding_tx.borrow().clone();
-                            if let Some(mut binding) = binding {
-                                binding.ready = false;
-                                binding_tx.send_replace(Some(binding));
+                            if let Err(error) = disconnect_outbox(&binding_tx, &outbox).await {
+                                snapshot.error = Some(error.to_string());
                             }
                         } else {
                             snapshot.qr_status = "准备连接".into();
@@ -219,6 +217,7 @@ async fn run(
                         snapshot.menu_error = None;
                         snapshot.qr_url = None; snapshot.qq_ready = false; pairing = None;
                         binding_tx.send_replace(None); credentials = None;
+                        if let Err(error) = outbox.discard_pending().await { snapshot.error = Some(error.to_string()); }
                         if let Err(error) = store.forget_credentials() { snapshot.error = Some(error.to_string()); }
                         {
                             let mut routes = hub.routes.lock().await;
@@ -296,8 +295,9 @@ async fn run(
                     }
                     Some(GatewayEvent::Disconnected) => {
                         snapshot.qq_ready = false; snapshot.qr_status = "QQ 正在重连".into();
-                        let binding = binding_tx.borrow().clone();
-                        if let Some(mut binding) = binding { binding.ready = false; binding_tx.send_replace(Some(binding)); }
+                        if let Err(error) = disconnect_outbox(&binding_tx, &outbox).await {
+                            snapshot.error = Some(error.to_string());
+                        }
                     }
                     Some(GatewayEvent::Message(message)) => {
                         let sender = message["author"]["user_openid"].as_str().unwrap_or_default();
@@ -320,7 +320,11 @@ async fn run(
                             }
                         }
                     }
-                    None => { gateway = None; snapshot.qq_ready = false; snapshot.error = Some("QQ 服务已停止，请重新检测。".into()); }
+                    None => {
+                        gateway = None; snapshot.qq_ready = false;
+                        snapshot.error = Some("QQ 服务已停止，请重新检测。".into());
+                        if let Err(error) = disconnect_outbox(&binding_tx, &outbox).await { snapshot.error = Some(error.to_string()); }
+                    }
                 }
             }
             event = bridge_events.recv() => { if let Some(event) = event { let _ = route_tx.send(RouteEvent::Bridge(event)).await; } }
@@ -403,6 +407,18 @@ async fn run(
     }
     let _ = std::fs::remove_file(store.root().join("bridge.json"));
     Ok(())
+}
+
+async fn disconnect_outbox(
+    binding: &watch::Sender<Option<Binding>>,
+    outbox: &Outbox,
+) -> Result<()> {
+    let current = binding.borrow().clone();
+    if let Some(mut current) = current {
+        current.ready = false;
+        binding.send_replace(Some(current));
+    }
+    outbox.discard_pending().await
 }
 
 async fn send_guide(outbox: &Outbox, resend: bool) -> Result<()> {

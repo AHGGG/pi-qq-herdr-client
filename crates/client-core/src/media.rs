@@ -162,20 +162,16 @@ fn download_url(value: &str, kind: &str) -> Result<url::Url> {
     Ok(url)
 }
 fn message_attachments(message: &Value) -> Vec<&Value> {
-    let mut entries = Vec::new();
-    if let Some(xs) = message["attachments"].as_array() {
-        entries.extend(xs.iter());
-    }
-    if let Some(xs) = message["msg_elements"].as_array() {
-        for x in xs {
-            if let Some(attachments) = x["attachments"].as_array() {
-                entries.extend(attachments.iter());
-            }
-        }
-    }
+    // QQ puts the referenced message in msg_elements. The reply's own
+    // attachments are on the outer message.
+    let Some(attachments) = message["attachments"].as_array() else {
+        return Vec::new();
+    };
     let mut seen = std::collections::HashSet::new();
-    entries.retain(|x| x["url"].as_str().is_none_or(|url| seen.insert(url)));
-    entries
+    attachments
+        .iter()
+        .filter(|entry| entry["url"].as_str().is_none_or(|url| seen.insert(url)))
+        .collect()
 }
 
 pub fn has_attachments(message: &Value) -> bool {

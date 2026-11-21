@@ -15,6 +15,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::RwLock;
+use unicode_width::UnicodeWidthStr;
 
 const HELP: &str = "Pi QQ\n\n/workspaces · Workspaces 列表\n/sessions [all] [页码] · Sessions 列表，含可恢复的记录\n/use sN · 选择在线 Session\n/resume sN · 恢复最近关闭的 Session\n/new [sN] · 新建 Pi（没有在线 Pi 也可创建）\n/name [sN] 名称 · 重命名 Session\n/status · 当前 Session 状态\n/peek [sN] · 查看当前输出\n/stop · 停止任务\n/close [sN] · 确认后关闭 Pi\n\n/commands · 模型与命令\n/model、/thinking、/compact、/reload\n/pi 命令 参数 · 已安装 Pi 命令\n/to sN 内容 · 指定 Session\n/steer 内容 · 反馈当前任务\n\n/answer qID 1 · 回答问卷\n/answer qID 1,2;=文字 · 多选/多题\n/cancel qID · 取消问卷\n/permissions · 等待中的权限\n/approve pID、/deny pID [原因]\n\n普通消息会发给选中的 Pi。引用通知回复可以继续原 Session；支持图片、视频、文件。/stop 保留 Pi，/close 才关闭终端。";
 
@@ -296,13 +297,8 @@ impl Router {
         let mut sections = vec![heading];
         if let Some(s) = &current {
             let name = list_label(&s.label);
-            let mut heading = format!("当前 · **{name}**");
-            let state = session_list_state(&s.state);
-            if !state.is_empty() {
-                heading.push_str(" · ");
-                heading.push_str(state);
-            }
-            sections.push(heading);
+            let state = selection_detail(session_list_state(&s.state));
+            sections.push(format!("当前 · **{name}**{state}"));
         }
         let online_heading = if current.is_some() {
             "其他在线"
@@ -329,7 +325,7 @@ impl Router {
                 sections.push(heading.to_string());
                 last_heading = heading;
             }
-            sections.push(selection_row(name, &command, false, state));
+            sections.push(session_row(name, &command, state));
         }
         if current.is_none() && count == 0 {
             sections.push("暂无在线或可恢复的 Session。".into());
@@ -1491,13 +1487,21 @@ fn list_heading(title: &str, count: usize, page: usize, pages: usize) -> String 
         format!("{title} · {count} 个")
     }
 }
+fn list_name(name: &str) -> String {
+    clean(name, 120)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 fn list_label(name: &str) -> String {
-    markdown_text(
-        &clean(name, 120)
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" "),
-    )
+    markdown_text(&list_name(name))
+}
+fn selection_detail(detail: &str) -> String {
+    if detail.is_empty() {
+        String::new()
+    } else {
+        format!(" · {detail}")
+    }
 }
 fn selection_row(name: &str, command: &str, selected: bool, detail: &str) -> String {
     format!(
@@ -1505,11 +1509,21 @@ fn selection_row(name: &str, command: &str, selected: bool, detail: &str) -> Str
         if selected { "✓ " } else { "" },
         list_label(name),
         command_link(command, ""),
-        if detail.is_empty() {
-            String::new()
-        } else {
-            format!(" · {}", markdown_text(detail))
-        }
+        markdown_text(&selection_detail(detail))
+    )
+}
+fn session_row(name: &str, command: &str, state: &str) -> String {
+    // The phone chat bubble fits roughly 16 full-width characters.
+    const INLINE_WIDTH: usize = 32;
+    let name = list_name(name);
+    let detail = selection_detail(state);
+    let width = name.width() + 1 + command.width() + detail.width();
+    let separator = if width <= INLINE_WIDTH { " " } else { "\n" };
+    format!(
+        "**{}**{separator}{}{}",
+        markdown_text(&name),
+        command_link(command, ""),
+        markdown_text(&detail)
     )
 }
 fn command_link(command: &str, label: &str) -> String {

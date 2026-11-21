@@ -69,6 +69,7 @@ async fn run(
     let outbox = Outbox::start(store.clone(), binding_rx, accepted_tx)?;
     let (events, mut bridge_events) = mpsc::channel::<BridgeEvent>(128);
     let hub = Hub::start(store.clone(), outbox.clone(), events).await?;
+    hub.supervise_remote(core.clone());
     let (route_tx, mut route_rx) = mpsc::channel(128);
     let (errors, mut error_rx) = mpsc::unbounded_channel::<String>();
     let (menu_results, mut menu_rx) = mpsc::unbounded_channel::<(String, Option<String>)>();
@@ -221,7 +222,7 @@ async fn run(
                         if let Err(error) = store.forget_credentials() { snapshot.error = Some(error.to_string()); }
                         {
                             let mut routes = hub.routes.lock().await;
-                            routes.selected = None; routes.workspace = None; routes.sources.clear(); routes.source_order.clear(); routes.pending_launches.clear(); routes.recent_sessions.clear(); routes.model_usage.clear(); routes.seen.clear();
+                            routes.selected = None; routes.workspace = None; routes.sources.clear(); routes.source_order.clear(); routes.pending_launches.clear(); routes.remote_relays.clear(); routes.recent_sessions.clear(); routes.model_usage.clear(); routes.seen.clear();
                         }
                         if let Err(error) = hub.save_routes().await { snapshot.error = Some(error.to_string()); }
                         snapshot.paused = false;

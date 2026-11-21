@@ -12,6 +12,14 @@ const EXTENSION: &str = include_str!("../../../integrations/pi/pi-qq-client.ts")
 const CONNECTION: &str = include_str!("../../../integrations/pi/connection.ts");
 const COMMANDS: &str = include_str!("../../../integrations/pi/commands.ts");
 const PERMISSIONS: &str = include_str!("../../../integrations/pi/permissions.ts");
+pub(crate) const RELAY: &str = include_str!("../../../integrations/pi/relay.mjs");
+pub(crate) const COMPANION: [(&str, &str); 5] = [
+    ("pi-qq-client/connection.ts", CONNECTION),
+    ("pi-qq-client/commands.ts", COMMANDS),
+    ("pi-qq-client/permissions.ts", PERMISSIONS),
+    ("pi-qq-client/relay.mjs", RELAY),
+    ("pi-qq-client.ts", EXTENSION),
+];
 const MANAGED: &str = "// Managed by pi-qq-herdr-client; protocol 1.";
 
 #[derive(Clone)]
@@ -90,12 +98,7 @@ pub(crate) fn search_path() -> Option<std::ffi::OsString> {
 
 pub fn install_extension(env: &Environment) -> Result<bool> {
     let dir = env.agent.join("extensions");
-    let files = [
-        (dir.join("pi-qq-client.ts"), EXTENSION),
-        (dir.join("pi-qq-client/connection.ts"), CONNECTION),
-        (dir.join("pi-qq-client/commands.ts"), COMMANDS),
-        (dir.join("pi-qq-client/permissions.ts"), PERMISSIONS),
-    ];
+    let files = COMPANION.map(|(name, source)| (dir.join(name), source));
     let mut changed = false;
     // Validate the whole installation before touching an existing file.
     for (path, source) in &files {
@@ -112,8 +115,7 @@ pub fn install_extension(env: &Environment) -> Result<bool> {
     }
     if changed {
         // Dependencies first, entry last. Pi only loads this on its next start/reload.
-        for index in [1, 2, 3, 0] {
-            let (path, content) = &files[index];
+        for (path, content) in &files {
             atomic_write(path, content.as_bytes())?;
         }
     }

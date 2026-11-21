@@ -8,6 +8,7 @@ pub mod menu;
 pub mod model;
 pub mod outbox;
 pub mod qq;
+mod relay;
 pub mod router;
 pub mod runtime;
 mod sessions;

@@ -5,13 +5,12 @@ use crate::{
     media,
     model::{PendingLaunch, ResumeTarget, Session, Workspace, WorkspaceId, clean},
     outbox::{Delivery, Outbox, ReplyContext},
-    qq, sessions,
+    qq, relay, sessions,
 };
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
-    path::Path,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -205,7 +204,7 @@ impl Router {
         let mut routes = self.hub.routes.lock().await;
         let mut result = Vec::new();
         for w in &cat.workspaces {
-            let identity = format!("{}:{}", w.key.core_id, w.key.id);
+            let identity = w.key.slot_key();
             if !routes.workspace_slots.contains_key(&identity) {
                 routes.next_workspace_slot += 1;
                 let slot = format!("w{}", routes.next_workspace_slot);
@@ -230,8 +229,11 @@ impl Router {
             let mut ranks = HashMap::new();
             let mut recent = Vec::new();
             for (index, session) in routes.recent_sessions.iter().enumerate() {
-                ranks.insert(session.session_id.clone(), index);
-                if !online.iter().any(|s| s.session_id == session.session_id) {
+                ranks.insert(session.peer_id.clone(), index);
+                if !online.iter().any(|s| {
+                    s.session_id == session.session_id
+                        && s.machine_id() == session.machine_id.as_deref()
+                }) {
                     if let Some(slot) = routes.slots.get(&session.peer_id) {
                         recent.push((slot.clone(), session.clone()));
                     }
@@ -259,33 +261,51 @@ impl Router {
                     && catalog
                         .workspaces
                         .iter()
-                        .filter(|w| w.cwd == workspace.cwd)
+                        .filter(|w| w.key.machine_id == key.machine_id && w.cwd == workspace.cwd)
                         .count()
                         == 1;
                 recent.retain(|(_, s)| {
                     s.workspace.as_ref() == Some(&key)
-                        || (s.workspace.is_none() && unique_cwd && s.cwd == workspace.cwd)
+                        || (s.machine_id == key.machine_id
+                            && s.workspace.is_none()
+                            && unique_cwd
+                            && s.cwd == workspace.cwd)
                 });
+            } else if key.machine_id.is_some() {
+                bail!("这个 Workspace 的机器未连接，请刷新 /workspaces 或查看 /sessions all");
             }
         }
-        let offline = match core {
-            Some(core) if !recent.is_empty() => {
-                tokio::task::spawn_blocking(move || {
-                    recent.retain(|(_, s)| {
-                        sessions::saved_file(s, &core.environment.agent)
-                            .is_ok_and(|path| path.is_some())
-                    });
-                    recent
-                })
-                .await?
+        let mut offline = Vec::new();
+        if let Some(core) = &core {
+            let (remote, local): (Vec<_>, Vec<_>) = recent
+                .into_iter()
+                .partition(|(_, s)| s.machine_id.is_some());
+            let agent = core.environment.agent.clone();
+            offline = tokio::task::spawn_blocking(move || {
+                local
+                    .into_iter()
+                    .filter(|(_, session)| {
+                        sessions::saved_file(session, &agent).is_ok_and(|path| path.is_some())
+                    })
+                    .collect()
+            })
+            .await?;
+            // /resume verifies the recorded history on the machine that owns it.
+            for (slot, session) in remote {
+                if session.session_file.is_some()
+                    && let Some(machine) = session.machine_id.as_deref()
+                    && core.machine_name(machine).await.is_some()
+                {
+                    offline.push((slot, session));
+                }
             }
-            _ => Vec::new(),
-        };
+            offline.sort_by_key(|(_, session)| ranks.get(&session.peer_id).copied());
+        }
         let current = online
             .iter()
             .position(|s| selected.as_ref() == Some(&s.id))
             .map(|index| online.remove(index));
-        online.sort_by_key(|s| ranks.get(&s.session_id).copied().unwrap_or(usize::MAX));
+        online.sort_by_key(|s| ranks.get(&s.id).copied().unwrap_or(usize::MAX));
         let count = online.len() + offline.len();
         let (page, pages, start) = page(page_arg, count, 8)?;
         let mut heading = "Sessions".to_string();
@@ -302,7 +322,10 @@ impl Router {
                 .as_deref()
                 .filter(|_| !routes.names.contains_key(peer_id))
                 .and_then(|workspace| {
-                    let folder = Path::new(cwd).file_name()?.to_str()?;
+                    let folder = cwd
+                        .trim_end_matches(['/', '\\'])
+                        .rsplit(['/', '\\'])
+                        .next()?;
                     let short_id = session_id.get(..6)?;
                     (workspace == list_name(folder) && label == format!("{folder} {short_id}"))
                         .then(|| format!("未命名 {short_id}"))
@@ -403,23 +426,35 @@ impl Router {
             .context("用法：/resume sN")?;
         let recent = {
             let routes = self.hub.routes.lock().await;
-            let session_id = routes
+            let peer = routes
                 .slots
                 .iter()
                 .find(|(_, saved)| *saved == slot)
-                .and_then(|(peer_id, _)| peer_id.rsplit_once(':'))
+                .map(|(peer, _)| peer.as_str());
+            let identity = peer
+                .and_then(|peer| peer.rsplit_once(':'))
                 .map(|(id, _)| id);
             routes
                 .recent_sessions
                 .iter()
-                .find(|s| Some(s.session_id.as_str()) == session_id)
+                .find(|session| {
+                    Some(session.peer_id.as_str()) == peer
+                        || session.peer_id.rsplit_once(':').map(|(id, _)| id) == identity
+                })
                 .cloned()
         }
         .context("找不到这个 Session 的最近记录，请刷新 /sessions")?;
         let online = self.hub.sessions().await;
-        let mut copies = online.iter().filter(|s| s.session_id == recent.session_id);
+        let mut copies = online.iter().filter(|s| {
+            s.session_id == recent.session_id && s.machine_id() == recent.machine_id.as_deref()
+        });
         if let Some(session) = copies.next() {
-            if copies.next().is_some() || !sessions::same_directory(&session.cwd, &recent.cwd) {
+            let same_directory = if recent.machine_id.is_some() {
+                session.cwd == recent.cwd
+            } else {
+                sessions::same_directory(&session.cwd, &recent.cwd)
+            };
+            if copies.next().is_some() || !same_directory {
                 bail!("这个 ID 对应多个 Session 或目录已变化，请在 /sessions 中选择在线的 Session");
             }
             return self.activate_session(session).await;
@@ -437,16 +472,37 @@ impl Router {
                     .find(|w| &w.key == key)
                     .map(|w| w.key.clone())
             } else {
-                let mut matching = catalog.workspaces.iter().filter(|w| w.cwd == recent.cwd);
+                let mut matching = catalog
+                    .workspaces
+                    .iter()
+                    .filter(|w| w.key.machine_id == recent.machine_id && w.cwd == recent.cwd);
                 let first = matching.next();
                 first
                     .filter(|_| matching.next().is_none())
                     .map(|w| w.key.clone())
             }
         };
+        if recent.machine_id.is_some() {
+            let workspace = workspace
+                .context("原远程 Workspace 不可用，请先在 Herdr 中检查目标机器和 Workspace")?;
+            let file = relay::remote_history(&core, &recent).await?;
+            return self
+                .launch_session(
+                    &core,
+                    &recent.cwd,
+                    Some(workspace),
+                    Launch::Resume {
+                        session_id: &recent.session_id,
+                        file: &file,
+                    },
+                )
+                .await;
+        }
         let agent = core.environment.agent.clone();
         let current = recent.clone();
-        let switched = online.iter().any(|s| s.pid == recent.pid);
+        let switched = online
+            .iter()
+            .any(|s| s.remote.is_none() && s.pid == recent.pid);
         let file = tokio::task::spawn_blocking(move || {
             if !switched && sessions::process_is_live(&current) {
                 bail!("原 Pi 进程仍在运行，可能正在重连。请稍后刷新 /sessions");
@@ -525,33 +581,38 @@ impl Router {
             }
             "workspaces" => {
                 const PAGE_SIZE: usize = 8;
-                let local = self.workspaces().await?;
-                let remote = self.core().await?.remote_workspaces().await;
-                let total = local.len() + remote.len();
+                let workspaces = self.workspaces().await?;
+                let total = workspaces.len();
                 let (page, pages, start) = page(&args, total, PAGE_SIZE)?;
                 let selected = self.hub.routes.lock().await.workspace.clone();
                 let sessions = self.hub.sessions().await;
                 let mut lines = vec![list_heading("Workspaces", total, page, pages)];
-                let local_rows = local.iter().map(|(slot, w)| {
-                    let count = sessions
-                        .iter()
-                        .filter(|s| {
-                            s.terminal
-                                .as_ref()
-                                .is_some_and(|terminal| w.terminals.contains(terminal))
-                        })
-                        .count();
-                    selection_row(
-                        &w.name,
-                        &format!("/workspace {slot}"),
-                        selected.as_ref() == Some(&w.key),
-                        &format!("{count} 个 Session"),
-                    )
-                });
-                let remote_rows = remote
+                let rows = workspaces
                     .iter()
-                    .map(|w| format!("**{}**\n{}", list_label(&w.name), list_label(&w.machine)));
-                lines.extend(local_rows.chain(remote_rows).skip(start).take(PAGE_SIZE));
+                    .skip(start)
+                    .take(PAGE_SIZE)
+                    .map(|(slot, w)| {
+                        let count = sessions
+                            .iter()
+                            .filter(|s| {
+                                s.terminal
+                                    .as_ref()
+                                    .is_some_and(|terminal| w.terminals.contains(terminal))
+                            })
+                            .count();
+                        let count = format!("{count} 个 Session");
+                        let detail = w.machine.as_ref().map_or_else(
+                            || count.clone(),
+                            |machine| format!("{} · {count}", list_name(machine)),
+                        );
+                        selection_row(
+                            &w.name,
+                            &format!("/workspace {slot}"),
+                            selected.as_ref() == Some(&w.key),
+                            &detail,
+                        )
+                    });
+                lines.extend(rows);
                 if total == 0 {
                     lines.push("暂无 Herdr Workspace。可在 Herdr 中创建，或直接 /new，在用户主目录启动第一个 Pi。".into());
                 }
@@ -587,7 +648,7 @@ impl Router {
                     routes.selected = (members.len() == 1).then(|| members[0].id.clone());
                     if let [session] = members.as_slice() {
                         routes.remember_session(session, true);
-                        routes.set_session_workspace(session, Some(w.key));
+                        routes.set_session_workspace(session, Some(w.key.clone()));
                     }
                 }
                 self.hub.save_routes().await?;
@@ -595,7 +656,7 @@ impl Router {
                     .send(
                         &format!(
                             "已选择 Workspace：{}\n新建 Pi 将使用此 Workspace。",
-                            clean(&w.name, 100)
+                            workspace_label(&w)
                         ),
                         None,
                         &[("Sessions", "/sessions".into()), ("新建 Pi", "/new".into())],
@@ -641,16 +702,16 @@ impl Router {
                                 .is_some_and(|terminal| w.terminals.contains(terminal))
                         })
                         .map(|(_, w)| w.clone())
-                } else if workspaces.len() == 1 {
+                } else if workspaces.len() == 1 && workspaces[0].1.key.machine_id.is_none() {
                     Some(workspaces[0].1.clone())
-                } else if workspaces.len() > 1 {
+                } else if !workspaces.is_empty() {
                     let mut lines = vec!["请选择新 Pi 的 Workspace，选好后点击“新建 Pi”：".into()];
                     for (slot, workspace) in workspaces.iter().take(8) {
                         lines.push(selection_row(
                             &workspace.name,
                             &format!("/workspace {slot}"),
                             false,
-                            "",
+                            workspace.machine.as_deref().unwrap_or_default(),
                         ));
                     }
                     return self
@@ -669,6 +730,9 @@ impl Router {
                     .map(|w| w.cwd.clone())
                     .or_else(|| source.as_ref().map(|s| s.cwd.clone()))
                     .unwrap_or_else(|| core.environment.home.to_string_lossy().into_owned());
+                if source.as_ref().is_some_and(|s| s.remote.is_some()) && key.is_none() {
+                    bail!("请选择远程 Pi 所在的 Workspace 后再 /new");
+                }
                 if let Some(key) = &key {
                     self.hub.routes.lock().await.workspace = Some(key.clone());
                     self.hub.save_routes().await?;
@@ -841,7 +905,18 @@ impl Router {
                 let files = media::receive(http, message).await?;
                 let mut prompt = if command == "steer" { args } else { text };
                 for f in &files {
-                    prompt.push_str(&format!("\n[QQ {}: {}]", f.kind, f.path.display()));
+                    let path = if session.remote.is_some() {
+                        let core = self.core().await?;
+                        tokio::time::timeout(
+                            Duration::from_secs(120),
+                            relay::put_attachment(&core, &session, f, &self.hub),
+                        )
+                        .await
+                        .context("远程附件传输超时")??
+                    } else {
+                        f.path.to_string_lossy().into_owned()
+                    };
+                    prompt.push_str(&format!("\n[QQ {}: {path}]", f.kind));
                 }
                 if prompt.trim().is_empty() {
                     bail!("消息为空");
@@ -896,41 +971,147 @@ impl Router {
             Launch::New(_) => None,
         };
         let restoring = resume.is_some();
-        let (terminal, pid) = core.launch(cwd, workspace.as_ref(), launch).await?;
         let core_id = core.catalog.read().await.core_id.clone();
-        {
-            let mut routes = self.hub.routes.lock().await;
-            routes
-                .pending_launches
-                .retain(|_, launch| launch.expires > now());
-            routes.pending_launches.insert(
-                terminal.clone(),
-                PendingLaunch {
-                    scope,
-                    core_id,
-                    terminal: terminal.clone(),
-                    pid,
-                    expires: now() + 5 * 60,
-                    workspace,
-                    resume,
-                },
-            );
+        let mut pending = PendingLaunch {
+            scope,
+            core_id,
+            terminal: String::new(),
+            pid: 0,
+            expires: now() + 5 * 60,
+            workspace,
+            resume,
+        };
+        let machine = pending
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.machine_id.as_deref());
+        if let Launch::Resume { session_id, file } = &launch {
+            core.check_resume(machine, session_id, file).await?;
         }
-        self.hub.save_routes().await?;
-        let note = if restoring {
+        let mut cwd = cwd.to_owned();
+        let remote = if let Some(key) = pending
+            .workspace
+            .as_ref()
+            .filter(|key| key.machine_id.is_some())
+        {
+            if self
+                .hub
+                .routes
+                .lock()
+                .await
+                .pending_launches
+                .values()
+                .any(|launch| launch.workspace.as_ref() == Some(key) && launch.expires > now())
+            {
+                bail!("这个 Workspace 有一个启动请求正在确认，请在 Herdr 或 /sessions 查看进度");
+            }
+            let workspace = core.remote_workspace(key).await?;
+            let master = self.hub.relay_master_key().await?;
+            let relay =
+                relay::RemoteRelay::prepare(core, workspace.key, pending.scope.clone(), &master)
+                    .await?;
+            if !restoring {
+                cwd = if workspace.cwd.is_empty() {
+                    relay.home().into()
+                } else {
+                    workspace.cwd
+                };
+            }
+            {
+                let mut routes = self.hub.routes.lock().await;
+                if !self.outbox.matches_scope(&pending.scope) {
+                    bail!("QQ 绑定已变化，远程启动已取消");
+                }
+                routes
+                    .remote_relays
+                    .insert(relay.relay.clone(), relay.clone());
+                routes
+                    .pending_launches
+                    .insert(relay.relay.clone(), pending.clone());
+            }
+            self.hub.save_routes().await?;
+            Some(relay)
+        } else {
+            None
+        };
+        let launched = core
+            .launch(&cwd, pending.workspace.as_ref(), launch, remote.as_ref())
+            .await;
+        let (terminal, note) = match launched {
+            Ok((terminal, pid)) => {
+                pending.terminal = terminal.clone();
+                pending.pid = pid;
+                let mut routes = self.hub.routes.lock().await;
+                routes
+                    .pending_launches
+                    .retain(|_, launch| launch.expires > now());
+                let key = if let Some(remote) = &remote {
+                    let saved = routes
+                        .remote_relays
+                        .get_mut(&remote.relay)
+                        .context("远程启动已结束或 QQ 绑定已变化")?;
+                    saved.terminal = terminal
+                        .split_once('/')
+                        .map(|(_, terminal)| terminal.into());
+                    remote.relay.clone()
+                } else {
+                    terminal.clone()
+                };
+                routes.pending_launches.insert(key, pending);
+                drop(routes);
+                self.hub.save_routes().await?;
+                (Some(terminal), None)
+            }
+            Err(error) => {
+                let Some(remote) = &remote else {
+                    return Err(error);
+                };
+                if error
+                    .downcast_ref::<crate::herdr::RpcFailure>()
+                    .is_some_and(|e| {
+                        matches!(
+                            e.0.as_str(),
+                            "invalid_params"
+                                | "not_found"
+                                | "needs_update"
+                                | "spawn_failed"
+                                | "unsupported"
+                        )
+                    })
+                {
+                    let mut routes = self.hub.routes.lock().await;
+                    routes.remote_relays.remove(&remote.relay);
+                    routes.pending_launches.remove(&remote.relay);
+                    drop(routes);
+                    self.hub.save_routes().await?;
+                    return Err(error);
+                }
+                (
+                    None,
+                    Some("Herdr 暂时未确认远程启动结果，正在检查目标机器。"),
+                )
+            }
+        };
+        let note = note.unwrap_or(if restoring {
             "正在打开原 Session，等 Pi 连接后即可继续。"
         } else {
             "Pi 终端已创建，正在等待扩展连接……"
-        };
+        });
         self.send(note, None, &[]).await?;
         // The Core acknowledgement does not prove Pi has registered.
         for _ in 0..60 {
-            if let Some(session) = self
-                .hub
-                .sessions()
-                .await
-                .into_iter()
-                .find(|s| s.terminal.as_deref() == Some(&terminal))
+            if let Some(session) =
+                self.hub
+                    .sessions()
+                    .await
+                    .into_iter()
+                    .find(|session| match &remote {
+                        Some(relay) => session
+                            .remote
+                            .as_ref()
+                            .is_some_and(|remote| remote.relay == relay.relay),
+                        None => session.terminal == terminal,
+                    })
             {
                 if self.complete_launch(&session, true).await? {
                     return Ok(());
@@ -940,8 +1121,10 @@ impl Router {
         }
         let note = if restoring {
             "原 Session 尚未确认连接。连接成功后会补发通知，可先在 Herdr 查看进度。"
-        } else {
+        } else if terminal.is_some() {
             "终端已创建，但 Pi 扩展尚未确认连接。连接成功后会补发通知；可查看 /sessions 和 Herdr，请不要重复 /new。"
+        } else {
+            "远程启动结果尚未确认。连接成功后会补发通知；请在 Herdr 检查目标机器。"
         };
         self.send(note, None, &[("Sessions", "/sessions all".into())])
             .await
@@ -951,30 +1134,33 @@ impl Router {
         let Some(terminal) = session.terminal.as_ref() else {
             return Ok(false);
         };
+        let key = session
+            .remote
+            .as_ref()
+            .map_or(terminal, |remote| &remote.relay);
         let pending = self
             .hub
             .routes
             .lock()
             .await
             .pending_launches
-            .get(terminal)
+            .get(key)
             .cloned();
         let Some(pending) = pending else {
             return Ok(false);
         };
         if pending.expires <= now() {
-            self.hub
-                .routes
-                .lock()
-                .await
-                .pending_launches
-                .remove(terminal);
+            self.hub.routes.lock().await.pending_launches.remove(key);
             self.hub.save_routes().await?;
             return Ok(false);
         }
         if pending.resume.as_ref().is_some_and(|target| {
             session.session_id != target.session_id
-                || !sessions::same_directory(&session.cwd, &target.cwd)
+                || if session.remote.is_some() {
+                    session.cwd != target.cwd
+                } else {
+                    !sessions::same_directory(&session.cwd, &target.cwd)
+                }
         }) {
             return Ok(false);
         }
@@ -983,7 +1169,9 @@ impl Router {
             return Ok(false);
         }
         let record = core.validate(session).await?;
-        if record["pid"].as_u64() != Some(pending.pid as u64) {
+        if (pending.pid != 0 || session.remote.is_none())
+            && record["pid"].as_u64() != Some(pending.pid as u64)
+        {
             return Ok(false);
         }
         let Some(session) = self
@@ -1020,7 +1208,7 @@ impl Router {
         let workspace = self.session_workspace(&session).await.or(pending.workspace);
         {
             let mut routes = self.hub.routes.lock().await;
-            routes.pending_launches.remove(terminal);
+            routes.pending_launches.remove(key);
             routes.remember_session(&session, select);
             routes.set_session_workspace(&session, workspace.clone());
             if select {
@@ -1449,7 +1637,7 @@ fn parse_answers(questions: &[Value], text: &str) -> Result<Value> {
     }
     Ok(json!(answers))
 }
-fn now() -> u64 {
+pub(crate) fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -1513,6 +1701,13 @@ fn list_heading(title: &str, count: usize, page: usize, pages: usize) -> String 
     } else {
         format!("{title} · {count} 个")
     }
+}
+fn workspace_label(workspace: &Workspace) -> String {
+    let name = list_name(&workspace.name);
+    workspace.machine.as_deref().map_or_else(
+        || name.clone(),
+        |machine| format!("{name} · {}", list_name(machine)),
+    )
 }
 fn list_name(name: &str) -> String {
     clean(name, 120)

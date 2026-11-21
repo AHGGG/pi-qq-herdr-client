@@ -46,7 +46,9 @@ export default function qqRemote(pi) {
     if (ctx?.hasUI) ctx.ui.notify(message, level);
   };
   const update = (state) => {
-    if (connection && connection.meta.state !== state) connection.update({ state });
+    if (!connection) return;
+    const sessionFile = ctx.sessionManager.getSessionFile();
+    if (connection.meta.state !== state || connection.meta.sessionFile !== sessionFile) connection.update({ state, sessionFile });
   };
   const runtime = (refreshUsage = true) => {
     const model = ctx.model;
@@ -91,8 +93,8 @@ export default function qqRemote(pi) {
 
   async function notify(text, { imagePath, videoPath, filePath, automatic = false } = {}) {
     if (!connection) throw new Error('QQ_SESSION_DISABLED: run /qq on');
-    const receipt = await connection.call({ type: 'notify', text, ...(imagePath ? { imagePath } : {}), ...(videoPath ? { videoPath } : {}), ...(filePath ? { filePath } : {}) },
-      { timeout: imagePath || videoPath || filePath ? 30_000 : 6000 });
+    const timeout = imagePath || videoPath || filePath ? (process.env.PI_QQ_RELAY ? 130_000 : 30_000) : 6000;
+    const receipt = await connection.call({ type: 'notify', text, ...(imagePath ? { imagePath } : {}), ...(videoPath ? { videoPath } : {}), ...(filePath ? { filePath } : {}) }, { timeout });
     if (receipt.state === 'skipped' && !automatic) throw new Error('QQ 未连接，消息没有发送。请恢复连接后重试。');
     return receipt;
   }
@@ -194,7 +196,7 @@ export default function qqRemote(pi) {
     ctx = currentCtx;
     const ownGeneration = ++generation;
     const sessionId = ctx.sessionManager.getSessionId();
-    const current = new Connection({ id: `${sessionId}:${process.pid}`, sessionId, label: label(), cwd: ctx.cwd, pid: process.pid,
+    const current = new Connection({ id: `${sessionId}:${process.pid}`, sessionId, label: label(), name: pi.getSessionName() || '', cwd: ctx.cwd, pid: process.pid,
       sessionFile: ctx.sessionManager.getSessionFile(),
       state: ctx.isIdle() ? 'idle' : 'working', terminal: process.env.HC_TERMINAL_ID,
       terminalSocket: process.env.HC_TERMINAL_SOCKET, runtime: runtime(),

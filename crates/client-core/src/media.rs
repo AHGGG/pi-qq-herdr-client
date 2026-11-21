@@ -19,7 +19,7 @@ pub struct Attachment {
     pub kind: String,
     pub file_name: String,
 }
-fn limit(kind: &str) -> usize {
+pub(crate) fn limit(kind: &str) -> usize {
     if kind == "image" {
         30 * 1024 * 1024
     } else {
@@ -32,14 +32,17 @@ pub async fn stage(path: &Path, kind: &str) -> Result<Attachment> {
         bail!("附件类型无效");
     }
     let bytes = read_file(path, kind).await?;
-    validate(&bytes, kind)?;
-    save(
+    stage_bytes(
         &bytes,
         kind,
         path.file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("attachment.bin"),
     )
+}
+pub(crate) fn stage_bytes(bytes: &[u8], kind: &str, name: &str) -> Result<Attachment> {
+    validate(bytes, kind)?;
+    save(bytes, kind, name)
 }
 async fn read_file(path: &Path, kind: &str) -> Result<Vec<u8>> {
     use tokio::io::AsyncReadExt;

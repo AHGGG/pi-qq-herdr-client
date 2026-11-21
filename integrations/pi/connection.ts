@@ -19,15 +19,24 @@ export class SessionConnection {
   async connect() {
     if (this.closed) return;
     try {
-      const info = JSON.parse(await readFile(join(root, 'bridge.json'), 'utf8'));
-      if (info.protocol !== 1 || !Number.isInteger(info.port) || info.port < 1 || info.port > 65535 || !/^[a-f0-9]{64}$/.test(info.token)) throw new Error('Unavailable');
-      if (this.closed) return;
-      const socket = new WebSocket(`ws://127.0.0.1:${info.port}/session`);
+      const relay = process.env.PI_QQ_RELAY;
+      let socket, token;
+      if (relay) {
+        const { RelaySocket } = await import('./relay.mjs');
+        if (this.closed) return;
+        socket = new RelaySocket(relay, this.meta);
+      } else {
+        const info = JSON.parse(await readFile(join(root, 'bridge.json'), 'utf8'));
+        if (info.protocol !== 1 || !Number.isInteger(info.port) || info.port < 1 || info.port > 65535 || !/^[a-f0-9]{64}$/.test(info.token)) throw new Error('Unavailable');
+        if (this.closed) return;
+        token = info.token;
+        socket = new WebSocket(`ws://127.0.0.1:${info.port}/session`);
+      }
       this.socket = socket;
-      this.watchdog = setTimeout(() => socket.close(), 8000); this.watchdog.unref?.();
+      this.watchdog = setTimeout(() => socket.close(), relay ? 18000 : 8000); this.watchdog.unref?.();
       socket.addEventListener('error', () => {});
       socket.addEventListener('open', () => {
-        void this.call({ type: 'register', protocol: 1, token: info.token, ...this.meta }).then((result) => {
+        void this.call({ type: 'register', protocol: 1, token, ...this.meta }, { timeout: relay ? 17000 : 8000 }).then((result) => {
           if (this.socket !== socket || this.closed) return;
           clearTimeout(this.watchdog); this.slot = result.slot; this.onState('connected', result);
         }, () => socket.close());
@@ -43,7 +52,10 @@ export class SessionConnection {
         } else if (message.type === 'action') {
           void Promise.resolve().then(() => this.onAction(message)).then((result) => {
             const { afterReply, onReplyFailure, ...reply } = result || {};
-            if (this.send({ type: 'action_result', requestId: message.requestId, ok: true, ...reply })) afterReply?.();
+            const response = { type: 'action_result', requestId: message.requestId, ok: true, ...reply };
+            if (afterReply && relay) {
+              void socket.sendAndWait(JSON.stringify(response)).then(afterReply, onReplyFailure);
+            } else if (this.send(response)) afterReply?.();
             else onReplyFailure?.();
           }, (error) => this.send({ type: 'action_result', requestId: message.requestId, ok: false, reason: String(error.message).slice(0, 300) }));
         }
@@ -63,7 +75,8 @@ export class SessionConnection {
   }
   send(message) {
     if (this.closed || this.socket?.readyState !== WebSocket.OPEN) return false;
-    this.socket.send(JSON.stringify(message)); return true;
+    try { this.socket.send(JSON.stringify(message)); return true; }
+    catch { return false; }
   }
   update(meta) { Object.assign(this.meta, meta); this.send({ type: 'update', ...meta }); }
   call(message, { timeout = 8000 } = {}) {

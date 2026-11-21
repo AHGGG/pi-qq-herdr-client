@@ -11,6 +11,9 @@ use std::{
 use sysinfo::{Pid, ProcessStatus, ProcessesToUpdate, System};
 
 pub(crate) fn saved_file(recent: &RecentSession, agent: &Path) -> Result<Option<PathBuf>> {
+    if recent.machine_id.is_some() {
+        return Ok(None);
+    }
     let cwd = Path::new(&recent.cwd);
     if !cwd.is_absolute() || !cwd.is_dir() {
         return Ok(None);
@@ -65,6 +68,9 @@ pub(crate) fn import_known_sessions(agent: &Path, routes: &mut Durable) -> Resul
         .slots
         .iter()
         .filter_map(|(peer, slot)| {
+            if peer.contains('/') {
+                return None;
+            }
             let (id, pid) = peer.rsplit_once(':')?;
             Some((
                 id,
@@ -126,6 +132,7 @@ pub(crate) fn import_known_sessions(agent: &Path, routes: &mut Durable) -> Resul
                 cwd: cwd.into(),
                 label,
                 workspace: None,
+                machine_id: None,
                 pid,
                 last_seen: 0,
             };

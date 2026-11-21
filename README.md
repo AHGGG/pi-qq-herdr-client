@@ -42,7 +42,9 @@
 
 关闭 Pi 后，`/sessions` 会保留最近且已保存的 Session。点击对应的 `/resume sN` 可在原项目目录继续历史对话。
 
-新建 Pi 会使用选中的 Workspace；没有 Workspace 时，会在用户主目录启动第一个 Pi。
+新建 Pi 会使用选中的 Workspace。连接了远程机器时，可在 `/workspaces` 按机器名选择 Workspace，再发送 `/new`。看到「新 Pi 已连接并选中」后，直接在当前机器人私聊继续发消息。Pi 使用目标机器上的项目目录、Pi 配置和模型。空 Workspace 没有保存目录时，使用目标账号的主目录。
+
+远程目标需已连接到 Herdr，且 macOS 或 Linux 上的 Herdr Core 能找到 Pi 和 Node。首次新建时，客户端通过 Herdr 安装配套扩展。QQ 绑定仍由运行桌面客户端的电脑管理。
 
 电脑需要保持开机、联网，客户端也需要保持运行。关闭窗口后会驻留托盘，右键托盘可暂停连接或退出。
 

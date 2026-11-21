@@ -97,9 +97,34 @@ pub struct Session {
     pub generation: String,
     #[serde(skip)]
     pub slot: String,
+    #[serde(skip)]
+    pub(crate) remote: Option<RemoteTerminal>,
+}
+
+#[derive(Clone)]
+pub(crate) struct RemoteTerminal {
+    pub core_id: String,
+    pub machine_id: String,
+    pub terminal: String,
+    pub pid: u32,
+    pub relay: String,
+    pub scope: String,
+    pub instance: String,
+}
+
+impl RemoteTerminal {
+    pub fn address(&self) -> String {
+        format!("{}/{}", self.machine_id, self.terminal)
+    }
 }
 
 impl Session {
+    pub(crate) fn machine_id(&self) -> Option<&str> {
+        self.remote
+            .as_ref()
+            .map(|remote| remote.machine_id.as_str())
+    }
+
     pub(crate) fn model_key(&self) -> Option<String> {
         let model = &self.runtime["model"];
         let provider = model["provider"].as_str().filter(|s| !s.is_empty())?;
@@ -121,6 +146,7 @@ pub struct Durable {
     pub sources: BTreeMap<String, String>,
     pub source_order: Vec<String>,
     pub pending_launches: BTreeMap<String, PendingLaunch>,
+    pub(crate) remote_relays: BTreeMap<String, crate::relay::RemoteRelay>,
     pub recent_sessions: Vec<RecentSession>,
     pub recent_sessions_initialized: bool,
     pub model_usage: BTreeMap<String, ModelUsage>,
@@ -144,10 +170,10 @@ impl Durable {
     }
 
     pub(crate) fn remember_session(&mut self, session: &Session, activate: bool) {
-        let existing = self
-            .recent_sessions
-            .iter()
-            .position(|recent| recent.session_id == session.session_id);
+        let existing = self.recent_sessions.iter().position(|recent| {
+            recent.session_id == session.session_id
+                && recent.machine_id.as_deref() == session.machine_id()
+        });
         let previous = existing.map(|index| &self.recent_sessions[index]);
         let same_directory = previous.filter(|recent| recent.cwd == session.cwd);
         let recent = RecentSession {
@@ -160,6 +186,7 @@ impl Durable {
             cwd: session.cwd.clone(),
             label: session.label.clone(),
             workspace: same_directory.and_then(|r| r.workspace.clone()),
+            machine_id: session.machine_id().map(String::from),
             pid: session.pid,
             last_seen: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -236,6 +263,8 @@ pub struct RecentSession {
     pub cwd: String,
     pub label: String,
     pub workspace: Option<WorkspaceId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_id: Option<String>,
     pub pid: u32,
     #[serde(default)]
     pub last_seen: u64,
@@ -251,12 +280,24 @@ pub struct ResumeTarget {
 pub struct WorkspaceId {
     pub core_id: String,
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_id: Option<String>,
+}
+
+impl WorkspaceId {
+    pub(crate) fn slot_key(&self) -> String {
+        match &self.machine_id {
+            Some(machine) => format!("{}:{machine}/{}", self.core_id, self.id),
+            None => format!("{}:{}", self.core_id, self.id),
+        }
+    }
 }
 
 #[derive(Clone)]
 pub struct Workspace {
     pub key: WorkspaceId,
     pub name: String,
+    pub machine: Option<String>,
     pub cwd: String,
     pub terminals: Vec<String>,
 }

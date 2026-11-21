@@ -54,7 +54,9 @@ impl ReplyContext {
     }
 }
 pub enum Delivery<'a> {
-    Notification,
+    Notification {
+        scope: Option<&'a str>,
+    },
     Interactive {
         scope: Option<&'a str>,
         reply: Option<&'a ReplyContext>,
@@ -152,6 +154,12 @@ impl Outbox {
         tokio::spawn(outbox.clone().worker(accepted, true));
         Ok(outbox)
     }
+    pub(crate) fn matches_scope(&self, scope: &str) -> bool {
+        self.binding
+            .borrow()
+            .as_ref()
+            .is_some_and(|binding| binding.scope() == scope)
+    }
     pub async fn discard_pending(&self) -> Result<()> {
         let mut state = self.saved.lock().await;
         state.pending.clear();
@@ -180,7 +188,7 @@ impl Outbox {
             .clone()
             .context("请先在桌面完成 QQ 授权和用户配对")?;
         let (interactive, expected_scope, reply) = match delivery {
-            Delivery::Notification => (false, None, None),
+            Delivery::Notification { scope } => (false, scope, None),
             Delivery::Interactive { scope, reply } => (true, scope, reply),
         };
         if expected_scope.is_some_and(|scope| scope != binding.scope()) {

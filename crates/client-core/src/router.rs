@@ -524,12 +524,15 @@ impl Router {
                     .await;
             }
             "workspaces" => {
-                let all = self.workspaces().await?;
-                let (page, pages, start) = page(&args, all.len(), 8)?;
+                const PAGE_SIZE: usize = 8;
+                let local = self.workspaces().await?;
+                let remote = self.core().await?.remote_workspaces().await;
+                let total = local.len() + remote.len();
+                let (page, pages, start) = page(&args, total, PAGE_SIZE)?;
                 let selected = self.hub.routes.lock().await.workspace.clone();
                 let sessions = self.hub.sessions().await;
-                let mut lines = vec![list_heading("Workspaces", all.len(), page, pages)];
-                for (slot, w) in all.iter().skip(start).take(8) {
+                let mut lines = vec![list_heading("Workspaces", total, page, pages)];
+                let local_rows = local.iter().map(|(slot, w)| {
                     let count = sessions
                         .iter()
                         .filter(|s| {
@@ -538,14 +541,18 @@ impl Router {
                                 .is_some_and(|terminal| w.terminals.contains(terminal))
                         })
                         .count();
-                    lines.push(selection_row(
+                    selection_row(
                         &w.name,
                         &format!("/workspace {slot}"),
                         selected.as_ref() == Some(&w.key),
                         &format!("{count} 个 Session"),
-                    ));
-                }
-                if all.is_empty() {
+                    )
+                });
+                let remote_rows = remote
+                    .iter()
+                    .map(|w| format!("**{}**\n{}", list_label(&w.name), list_label(&w.machine)));
+                lines.extend(local_rows.chain(remote_rows).skip(start).take(PAGE_SIZE));
+                if total == 0 {
                     lines.push("暂无 Herdr Workspace。可在 Herdr 中创建，或直接 /new，在用户主目录启动第一个 Pi。".into());
                 }
                 let mut buttons = pages_buttons("/workspaces", page, pages);

@@ -3,6 +3,7 @@ use crate::{
     model::{Session, Workspace, WorkspaceId},
 };
 use anyhow::{Context, Result, anyhow, bail};
+use futures_util::future::join_all;
 use serde_json::{Value, json};
 use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
 use tokio::{
@@ -20,9 +21,16 @@ pub struct Catalog {
     pub core_id: String,
     pub terminals: Vec<Value>,
     pub workspaces: Vec<Workspace>,
+    remote_machines: Vec<String>,
     pub ready: bool,
     pub error: Option<String>,
 }
+
+pub(crate) struct RemoteWorkspace {
+    pub name: String,
+    pub machine: String,
+}
+
 #[derive(Clone)]
 pub struct Core {
     requests: mpsc::Sender<Request>,
@@ -61,6 +69,30 @@ impl Core {
             .await
             .context("Herdr 未确认操作，请检查后再重试")?
             .context("Herdr 连接中断，操作结果未确认")?
+    }
+    pub(crate) async fn remote_workspaces(&self) -> Vec<RemoteWorkspace> {
+        let machines = self.catalog.read().await.remote_machines.clone();
+        let documents = join_all(machines.into_iter().map(|machine| async move {
+            let read = self.request("doc.get", json!({"name":"herdr-app", "on":machine}));
+            let doc = tokio::time::timeout(Duration::from_secs(3), read)
+                .await
+                .ok()?
+                .ok()?;
+            Some((machine, doc))
+        }))
+        .await;
+        let catalog = self.catalog.read().await;
+        let mut workspaces = Vec::new();
+        for (machine, doc) in documents.into_iter().flatten() {
+            for (_, space) in document_spaces(&doc) {
+                let members = workspace_members(space, &catalog.terminals, Some(&machine));
+                workspaces.push(RemoteWorkspace {
+                    name: workspace_name(space, &members).into(),
+                    machine: machine.clone(),
+                });
+            }
+        }
+        workspaces
     }
     pub async fn validate(&self, session: &Session) -> Result<Value> {
         let terminal = session
@@ -302,76 +334,116 @@ async fn refresh(core: &Core) -> Result<()> {
         .as_array()
         .context("terminal list invalid")?
         .clone();
+    let remote_machines = list["machines"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|machine| machine["state"] == "connected" && machine["temporary"] != true)
+        .filter_map(|machine| nonempty(&machine["name"]).map(String::from))
+        .collect();
     let mut cat = core.catalog.write().await;
-    let mut workspaces = Vec::new();
-    if let Some(spaces) = doc["value"]["spaces"].as_array() {
-        for space in spaces {
-            let Some(id) = space["id"].as_str() else {
-                continue;
-            };
-            if !space["machine"].is_null() {
-                continue;
-            }
-            let mut addresses = Vec::new();
-            if let Some(tabs) = space["tabs"].as_array() {
-                for tab in tabs {
-                    collect_addresses(&tab["root"], &mut addresses);
-                }
-            }
-            let members: Vec<_> = terminals
-                .iter()
-                .filter(|t| {
-                    t["state"] == "live"
-                        && (t["labels"]["herdr.space"] == id
-                            || t["address"]
-                                .as_str()
-                                .is_some_and(|s| addresses.iter().any(|a| a == s)))
-                })
-                .collect();
-            let cwd = space["folder"]
-                .as_str()
-                .filter(|folder| !folder.trim().is_empty())
-                .or_else(|| {
-                    members.first().and_then(|t| {
-                        t["foreground"]["cwd"]
-                            .as_str()
-                            .or_else(|| t["cwd"].as_str())
-                    })
-                })
+    cat.workspaces = document_spaces(&doc)
+        .map(|(id, space)| {
+            let members = workspace_members(space, &terminals, None);
+            let cwd = nonempty(&space["folder"])
+                .or_else(|| members.iter().find_map(|t| terminal_directory(t)))
                 .unwrap_or_default();
-            let name = ["name", "title"]
-                .into_iter()
-                .filter_map(|field| space[field].as_str())
-                .map(str::trim)
-                .find(|name| !name.is_empty() && *name != id)
-                .or_else(|| {
-                    cwd.trim_end_matches(['/', '\\'])
-                        .rsplit(['/', '\\'])
-                        .next()
-                        .filter(|name| !name.is_empty())
-                })
-                .unwrap_or("未命名 Workspace");
-            workspaces.push(Workspace {
+            Workspace {
                 key: WorkspaceId {
                     core_id: cat.core_id.clone(),
                     id: id.into(),
                 },
-                name: name.into(),
+                name: workspace_name(space, &members).into(),
                 cwd: cwd.into(),
                 terminals: members
                     .iter()
                     .filter_map(|t| t["address"].as_str().map(String::from))
                     .collect(),
-            });
-        }
-    }
+            }
+        })
+        .collect();
     cat.terminals = terminals;
-    cat.workspaces = workspaces;
+    cat.remote_machines = remote_machines;
     Ok(())
 }
-fn collect_addresses(value: &Value, result: &mut Vec<String>) {
+
+fn document_spaces(doc: &Value) -> impl Iterator<Item = (&str, &Value)> {
+    doc["value"]["spaces"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|space| space["machine"].is_null())
+        .filter_map(|space| nonempty(&space["id"]).map(|id| (id, space)))
+}
+
+fn workspace_members<'a>(
+    space: &Value,
+    terminals: &'a [Value],
+    machine: Option<&str>,
+) -> Vec<&'a Value> {
+    let mut addresses = Vec::new();
+    for tab in space["tabs"].as_array().into_iter().flatten() {
+        collect_addresses(&tab["root"], &mut addresses);
+    }
+    let mut members: Vec<_> = terminals
+        .iter()
+        .filter(|t| t["state"] == "live")
+        .filter_map(|t| {
+            // Layouts store bare IDs. Core qualifies addresses in cross-machine listings.
+            let address = t["address"].as_str()?;
+            let (host, id) = address
+                .split_once('/')
+                .map_or((None, address), |(host, id)| (Some(host), id));
+            if host != machine {
+                return None;
+            }
+            let position = addresses.iter().position(|&address| address == id);
+            // A new terminal can carry its Workspace ID before App places it in the layout.
+            (position.is_some() || t["labels"]["herdr.space"] == space["id"])
+                .then_some((position.unwrap_or(usize::MAX), t))
+        })
+        .collect();
+    members.sort_by_key(|(position, _)| *position);
+    members.into_iter().map(|(_, t)| t).collect()
+}
+
+fn workspace_name<'a>(space: &'a Value, members: &[&'a Value]) -> &'a str {
+    ["name", "title"]
+        .into_iter()
+        .filter_map(|field| nonempty(&space[field]).map(str::trim))
+        .find(|&name| space["id"] != name)
+        .or_else(|| {
+            members.iter().find_map(|t| {
+                let (name, _) = t["labels"]["where"].as_str()?.split_once(" / ")?;
+                let name = name.trim();
+                (!name.is_empty()).then_some(name)
+            })
+        })
+        .or_else(|| {
+            let folder = members
+                .iter()
+                .find_map(|t| terminal_directory(t))
+                .or_else(|| nonempty(&space["folder"]))?;
+            folder
+                .trim_end_matches(['/', '\\'])
+                .rsplit(['/', '\\'])
+                .next()
+                .filter(|name| !name.is_empty())
+        })
+        .unwrap_or("未命名 Workspace")
+}
+
+fn nonempty(value: &Value) -> Option<&str> {
+    value.as_str().filter(|s| !s.trim().is_empty())
+}
+
+fn terminal_directory(terminal: &Value) -> Option<&str> {
+    nonempty(&terminal["foreground"]["cwd"]).or_else(|| nonempty(&terminal["cwd"]))
+}
+
+fn collect_addresses<'a>(value: &'a Value, result: &mut Vec<&'a str>) {
     if let Some(s) = value["content"]["terminal"].as_str() {
-        result.push(s.into());
+        result.push(s);
     }
     if let Some(children) = value["children"].as_array() {
         for child in children {

@@ -297,7 +297,7 @@ impl Router {
         if let Some(s) = &current {
             let name = list_label(&s.label);
             let state = session_list_state(&s.state);
-            sections.push(format!("当前 Session\n**{name}**{state}"));
+            sections.push(format!("当前 · **{name}**{state}"));
         }
         let online_heading = if current.is_some() {
             "其他在线"
@@ -323,7 +323,7 @@ impl Router {
         let mut last_heading = "";
         for (heading, name, command, state) in live_rows.chain(saved_rows).skip(start).take(8) {
             if heading != last_heading {
-                sections.push(format!("**{heading}**"));
+                sections.push(heading.to_string());
                 last_heading = heading;
             }
             let section = sections.last_mut().unwrap();

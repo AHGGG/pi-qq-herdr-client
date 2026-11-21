@@ -243,11 +243,11 @@ impl Router {
             )
         };
         let core = self.core.read().await.clone();
-        let mut scoped = false;
+        let mut workspace_name = None;
         if let (false, Some(key), Some(core)) = (all, workspace, &core) {
             let catalog = core.catalog.read().await;
             if let Some(workspace) = catalog.workspaces.iter().find(|w| w.key == key) {
-                scoped = true;
+                workspace_name = Some(list_label(&workspace.name));
                 online.retain(|s| {
                     s.terminal
                         .as_ref()
@@ -279,54 +279,74 @@ impl Router {
             }
             _ => Vec::new(),
         };
-        let rank = |session_id: &str| ranks.get(session_id).copied().unwrap_or(usize::MAX);
+        let current = online
+            .iter()
+            .position(|s| selected.as_ref() == Some(&s.id))
+            .map(|index| online.remove(index));
+        online.sort_by_key(|s| ranks.get(&s.session_id).copied().unwrap_or(usize::MAX));
+        let count = online.len() + offline.len();
+        let (page, pages, start) = page(page_arg, count, 8)?;
+        let mut heading = "Sessions".to_string();
+        if let Some(name) = &workspace_name {
+            heading.push_str(&format!(" · {name}"));
+        }
+        if pages > 1 {
+            heading.push_str(&format!(" · {page}/{pages}"));
+        }
+        let mut sections = vec![heading];
+        if let Some(s) = &current {
+            let name = list_label(&s.label);
+            let state = session_list_state(&s.state);
+            let rename = commands::input_link(&format!("/name {} ", s.slot), "重命名");
+            sections.push(format!("当前 Session\n**{name}**{state}\n{rename}"));
+        }
+        let online_heading = if current.is_some() {
+            "其他在线"
+        } else {
+            "在线"
+        };
         let live_rows = online.iter().map(|s| {
-            let active = selected.as_ref() == Some(&s.id);
             (
-                (!active, rank(&s.session_id)),
-                selection_row(
-                    &s.label,
-                    &format!("/use {}", s.slot),
-                    active,
-                    state_name(&s.state),
-                ),
+                online_heading,
+                &s.label,
+                format!("/use {}", s.slot),
+                session_list_state(&s.state),
             )
         });
         let saved_rows = offline.iter().map(|(slot, s)| {
             (
-                (true, rank(&s.session_id)),
-                selection_row(&s.label, &format!("/resume {slot}"), false, "离线，可恢复"),
+                "最近可恢复",
+                &s.label,
+                format!("/resume {slot}"),
+                String::new(),
             )
         });
-        let mut rows: Vec<_> = live_rows.chain(saved_rows).collect();
-        rows.sort_by_key(|(priority, _)| *priority);
-        let count = rows.len();
-        let (page, pages, start) = page(page_arg, count, 8)?;
-        let mut lines = vec![list_heading("Sessions", count, page, pages)];
-        lines.extend(rows.into_iter().skip(start).take(8).map(|(_, row)| row));
-        if count == 0 {
-            lines.push(
-                if scoped {
-                    "此 Workspace 暂无 Session。"
-                } else {
-                    "暂无在线或可恢复的 Session。"
-                }
-                .into(),
-            );
+        let mut last_heading = "";
+        for (heading, name, command, state) in live_rows.chain(saved_rows).skip(start).take(8) {
+            if heading != last_heading {
+                sections.push(format!("**{heading}**"));
+                last_heading = heading;
+            }
+            let section = sections.last_mut().unwrap();
+            section.push_str(&format!(
+                "\n{} · {}{state}",
+                list_label(name),
+                command_link(&command, "")
+            ));
+        }
+        if current.is_none() && count == 0 {
+            sections.push("暂无在线或可恢复的 Session。".into());
         }
         let mut buttons =
             pages_buttons(if all { "/sessions all" } else { "/sessions" }, page, pages);
-        if let Some(s) = online.iter().find(|s| selected.as_ref() == Some(&s.id)) {
-            buttons.push(("重命名当前", format!("/name {} ", s.slot)));
-        }
-        if scoped {
+        if workspace_name.is_some() {
             buttons.push(("全部", "/sessions all".into()));
         }
         buttons.extend([
             ("Workspaces", "/workspaces".into()),
             ("新建 Pi", "/new".into()),
         ]);
-        self.send(&lines.join("\n\n"), None, &buttons).await
+        self.send(&sections.join("\n\n"), None, &buttons).await
     }
 
     async fn session_workspace(&self, session: &Session) -> Option<WorkspaceId> {
@@ -1469,15 +1489,19 @@ fn list_heading(title: &str, count: usize, page: usize, pages: usize) -> String 
         format!("{title} · {count} 个")
     }
 }
+fn list_label(name: &str) -> String {
+    markdown_text(
+        &clean(name, 120)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
 fn selection_row(name: &str, command: &str, selected: bool, detail: &str) -> String {
-    let title = clean(name, 120)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
     format!(
         "{}**{}**\n{}{}",
         if selected { "✓ " } else { "" },
-        markdown_text(&title),
+        list_label(name),
         command_link(command, ""),
         if detail.is_empty() {
             String::new()
@@ -1496,6 +1520,13 @@ fn command_link(command: &str, label: &str) -> String {
         "<qqbot-cmd-enter text=\"{}\" />",
         url::form_urlencoded::byte_serialize(text.as_bytes()).collect::<String>()
     )
+}
+fn session_list_state(state: &str) -> String {
+    if state == "idle" {
+        String::new()
+    } else {
+        format!(" · {}", state_name(state))
+    }
 }
 fn state_name(state: &str) -> &str {
     match state {

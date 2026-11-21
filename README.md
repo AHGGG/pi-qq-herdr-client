@@ -23,7 +23,8 @@
 ## QQ 内的交互
 
 - **左滑引用回复**：向左滑动 Pi 的一条回复或通知，引用后直接回复。内容会发回原消息对应的 Session，切换过 Session 也能继续原来的对话。
-- **点击按钮操作**：通过列表和消息卡片上的按钮选择 Session、打开“模型与命令”或“查看当前输出”。
+- **点击按钮操作**：在 `/sessions` 选好 Session 后，点回执里的「重命名」填写名称。回执也能打开「模型与命令」和「查看当前输出」。
+- **快速选择常用模型**：在 `/commands` 点 Model，模型列表按选择与使用记录排序。
 - **随时补充要求**：选择 Session 后直接发送文字或附件；Pi 工作时，新的补充要求会作为当前任务的反馈。
 
 ## 常用操作
@@ -31,14 +32,15 @@
 | 想做什么 | 发送什么 |
 | --- | --- |
 | 选择 Workspace | `/workspaces` |
-| 切换 Session | `/sessions` |
+| 切换或恢复 Session | `/sessions` |
+| 重命名当前 Session | `/name 名称` |
 | 新建 Pi | `/new` |
 | 调整模型、Thinking 或使用命令 | `/commands` |
 | 查看状态或当前输出 | `/status`、`/peek` |
 | 停止任务或关闭 Pi | `/stop`、`/close` |
 | 查看完整帮助 | `/help` |
 
-一个 Session 就是一个独立运行的 Pi。
+关闭 Pi 后，`/sessions` 会保留最近且已保存的 Session。点击对应的 `/resume sN` 可在原项目目录继续历史对话。
 
 新建 Pi 会使用选中的 Workspace；没有 Workspace 时，会在用户主目录启动第一个 Pi。
 

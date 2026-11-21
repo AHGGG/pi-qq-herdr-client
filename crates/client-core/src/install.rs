@@ -34,15 +34,19 @@ pub fn locate(config: &Config) -> std::result::Result<Environment, Dependency> {
     .or_else(|| executable(config.pi_path.as_deref(), "pi"))
     .ok_or(Dependency::Pi)?;
     let core = executable(config.core_path.as_deref(), "hc").ok_or(Dependency::Herdr)?;
-    let agent = std::env::var_os("PI_CODING_AGENT_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".pi/agent"));
+    let agent = agent_directory(&home);
     Ok(Environment {
         core,
         pi,
         home,
         agent,
     })
+}
+
+pub(crate) fn agent_directory(home: &Path) -> PathBuf {
+    std::env::var_os("PI_CODING_AGENT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".pi/agent"))
 }
 
 fn executable(override_path: Option<&Path>, name: &str) -> Option<PathBuf> {

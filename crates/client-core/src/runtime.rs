@@ -221,7 +221,7 @@ async fn run(
                         if let Err(error) = store.forget_credentials() { snapshot.error = Some(error.to_string()); }
                         {
                             let mut routes = hub.routes.lock().await;
-                            routes.selected = None; routes.workspace = None; routes.sources.clear(); routes.source_order.clear(); routes.pending_launches.clear(); routes.seen.clear();
+                            routes.selected = None; routes.workspace = None; routes.sources.clear(); routes.source_order.clear(); routes.pending_launches.clear(); routes.recent_sessions.clear(); routes.model_usage.clear(); routes.seen.clear();
                         }
                         if let Err(error) = hub.save_routes().await { snapshot.error = Some(error.to_string()); }
                         snapshot.paused = false;

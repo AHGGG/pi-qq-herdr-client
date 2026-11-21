@@ -4,7 +4,7 @@ use crate::{
 };
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     sync::{RwLock, mpsc, oneshot},
@@ -28,6 +28,11 @@ pub struct Core {
     requests: mpsc::Sender<Request>,
     pub catalog: Arc<RwLock<Catalog>>,
     pub environment: Environment,
+}
+
+pub(crate) enum Launch<'a> {
+    New(Option<&'a Session>),
+    Resume { session_id: &'a str, file: &'a Path },
 }
 
 impl Core {
@@ -83,13 +88,13 @@ impl Core {
         }
         Ok(record.clone())
     }
-    pub async fn launch(
+    pub(crate) async fn launch(
         &self,
         cwd: &str,
         workspace: Option<&WorkspaceId>,
-        source: Option<&Session>,
+        launch: Launch<'_>,
     ) -> Result<(String, u32)> {
-        if !std::path::Path::new(cwd).is_dir() {
+        if !Path::new(cwd).is_dir() {
             bail!("工作目录无效，请在 Herdr 中检查项目目录，或通过 /workspaces 重新选择 Workspace");
         }
         let mut labels = json!({"pi.qq-client": "1"});
@@ -137,27 +142,53 @@ impl Core {
             env.insert("PI_QQ_CLIENT_DIR".into(), json!(root.to_string_lossy()));
         }
         let mut argv = vec![self.environment.pi.to_string_lossy().into_owned()];
-        if let Some(source) = source {
-            if let (Some(provider), Some(model)) = (
-                source.runtime["model"]["provider"].as_str(),
-                source.runtime["model"]["id"].as_str(),
-            ) {
-                argv.extend([
-                    "--provider".into(),
-                    provider.into(),
-                    "--model".into(),
-                    model.into(),
-                ]);
+        let keep = match launch {
+            Launch::New(source) => {
+                if let Some(source) = source {
+                    if let (Some(provider), Some(model)) = (
+                        source.runtime["model"]["provider"].as_str(),
+                        source.runtime["model"]["id"].as_str(),
+                    ) {
+                        argv.extend([
+                            "--provider".into(),
+                            provider.into(),
+                            "--model".into(),
+                            model.into(),
+                        ]);
+                    }
+                    if let Some(level) = source.runtime["thinkingLevel"].as_str() {
+                        argv.extend(["--thinking".into(), level.into()]);
+                    }
+                }
+                workspace.is_some()
             }
-            if let Some(level) = source.runtime["thinkingLevel"].as_str() {
-                argv.extend(["--thinking".into(), level.into()]);
+            Launch::Resume { session_id, file } => {
+                // A prior request with a lost response may still be starting Pi.
+                let list = self.request("terminal.list", json!({})).await?;
+                if list["terminals"]
+                    .as_array()
+                    .context("无法核对 Herdr 终端")?
+                    .iter()
+                    .any(|record| {
+                        record["state"] == "live" && record["labels"]["pi.qq-resume"] == session_id
+                    })
+                {
+                    bail!("这个 Session 正在恢复或仍在 Herdr 中运行，请稍后刷新 Sessions");
+                }
+                if !file.is_file() {
+                    bail!("原 Session 历史文件已不可用");
+                }
+                let file = file.to_str().context("Session 历史路径无法传给 Pi")?;
+                labels["pi.qq-resume"] = json!(session_id);
+                argv.extend(["--session".into(), file.into()]);
+                false
             }
-        }
+        };
         let result = self
             .request(
                 "terminal.run",
                 json!({"argv":argv, "cwd":cwd, "env":env,
-            "labels":labels, "no_parent":true,"wait":false,"keep":workspace.is_some()}),
+            "labels":labels, "no_parent":true,"wait":false,"keep":keep}),
             )
             .await?;
         let address = result["address"]

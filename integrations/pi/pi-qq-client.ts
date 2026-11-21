@@ -195,6 +195,7 @@ export default function qqRemote(pi) {
     const ownGeneration = ++generation;
     const sessionId = ctx.sessionManager.getSessionId();
     const current = new Connection({ id: `${sessionId}:${process.pid}`, sessionId, label: label(), cwd: ctx.cwd, pid: process.pid,
+      sessionFile: ctx.sessionManager.getSessionFile(),
       state: ctx.isIdle() ? 'idle' : 'working', terminal: process.env.HC_TERMINAL_ID,
       terminalSocket: process.env.HC_TERMINAL_SOCKET, runtime: runtime(),
       capabilities: ['prompt', 'stop', 'name', 'commands', 'question-answer', 'permission-answer'], reloadToken,

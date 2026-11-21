@@ -10,6 +10,7 @@ pub mod outbox;
 pub mod qq;
 pub mod router;
 pub mod runtime;
+mod sessions;
 pub mod store;
 
 pub use model::{Command, Config, Snapshot};

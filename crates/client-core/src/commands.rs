@@ -3,10 +3,13 @@ use crate::{bridge::Hub, model::Session};
 use anyhow::{Context, Result, bail};
 use futures_util::future::try_join_all;
 use serde_json::{Value, json};
+use std::cmp::Reverse;
 
-pub(crate) const HELP: &str = "模型与命令\n\n/commands · 打开 Model、Thinking、Compact、Reload、All cmds、Status、Approvals、Peek\n/commands 1 · 浏览已安装命令，每页最多 12 项\n/model [页码] · 浏览可用模型，每页最多 12 项\n/model PROVIDER/MODEL · 选择模型\n/thinking · 选择 Thinking 等级\n/thinking high · 设置等级（以模型实际支持为准）\n/compact [补充要求] · 整理上下文，随后通知结果\n/reload · 重载扩展并确认此 Pi 重新连接\n/pi 命令 参数 · 提交此 Pi 已安装的命令\n/status [sN] · 模型、状态与上下文\n/peek [sN] · 查看当前输出（Pi 屏幕文字）\n\n列表中的命令会先填入输入框，可添加参数后发送；模型和 Thinking 选项可直接选择。上一页、下一页、返回和状态按钮都绑定到原 Pi。\n\n模型与 Thinking 修改、压缩、重载和 /pi 需要 Pi 空闲。部分命令或弹窗仍需在 Pi 终端处理。\n\n/to sN /commands · 打开指定 Pi 的模型与命令，不切换当前 Session。";
+pub(crate) const HELP: &str = "模型与命令\n\n/commands · 打开 Model、Thinking、Compact、Reload、All cmds、Status、Approvals、Peek\n/commands 1 · 浏览已安装命令，每页最多 12 项\n/model [页码] · 浏览可用模型，常用的排在前面，每页最多 12 项\n/model PROVIDER/MODEL · 选择模型\n/thinking · 选择 Thinking 等级\n/thinking high · 设置等级（以模型实际支持为准）\n/compact [补充要求] · 整理上下文，随后通知结果\n/reload · 重载扩展并确认此 Pi 重新连接\n/pi 命令 参数 · 提交此 Pi 已安装的命令\n/status [sN] · 模型、状态与上下文\n/peek [sN] · 查看当前输出（Pi 屏幕文字）\n\n列表中的命令会先填入输入框，可添加参数后发送；模型和 Thinking 选项可直接选择。上一页、下一页、返回和状态按钮都绑定到原 Pi。\n\n模型与 Thinking 修改、压缩、重载和 /pi 需要 Pi 空闲。部分命令或弹窗仍需在 Pi 终端处理。\n\n/to sN /commands · 打开指定 Pi 的模型与命令，不切换当前 Session。";
 
 const SOURCE_PAGES_PER_VIEW: u64 = 4;
+const SOURCE_PAGE_SIZE: usize = 3;
+const MODEL_PAGE_BATCH: usize = 16;
 const THINKING_LEVELS: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 pub(crate) struct Reply {
@@ -99,8 +102,6 @@ async fn command_list(hub: &Hub, session: &Session, name: &str, args: &str) -> R
             read_command(hub, session, name, args).await
         };
     }
-    // The Pi extension exposes three entries per source page. Preserve its
-    // protocol while grouping four read-only pages into each phone page.
     let pages = source_pages.div_ceil(SOURCE_PAGES_PER_VIEW);
     let page = if args.is_empty() {
         1
@@ -108,51 +109,86 @@ async fn command_list(hub: &Hub, session: &Session, name: &str, args: &str) -> R
         args.parse::<u64>().unwrap_or(u64::MAX).min(pages)
     };
     let start = (page - 1) * SOURCE_PAGES_PER_VIEW + 1;
-    let count = (source_pages - start + 1).min(SOURCE_PAGES_PER_VIEW);
-    let replies = try_join_all((0..count).map(|offset| {
-        let number = start + offset;
-        let first = &first;
-        async move {
-            if number == 1 {
-                Ok(first.clone())
-            } else {
-                read_command(hub, session, name, &number.to_string()).await
-            }
-        }
-    }))
-    .await?;
+    // Rank across all source pages so a favorite can move to the first phone page.
+    // The command catalog only needs the pages that will be displayed.
+    let (from, through) = if model {
+        (1, source_pages)
+    } else {
+        (
+            start,
+            start
+                .saturating_add(SOURCE_PAGES_PER_VIEW - 1)
+                .min(source_pages),
+        )
+    };
     let mut choices = Vec::new();
     let mut entries = Vec::new();
-    for (index, reply) in replies.iter().enumerate() {
-        let items = reply["choices"]
-            .as_array()
-            .context("列表在加载过程中发生变化，请重新打开。")?;
-        if reply["status"] != "completed"
-            || reply["view"] != view
-            || reply["page"].as_u64() != Some(start + index as u64)
-            || reply["pages"].as_u64() != Some(source_pages)
-            || !reply["text"].is_string()
-            || items.len() > 3
-        {
-            bail!("列表在加载过程中发生变化，请重新打开。");
+    for batch in (from..=through).step_by(MODEL_PAGE_BATCH) {
+        let end = batch
+            .saturating_add(MODEL_PAGE_BATCH as u64 - 1)
+            .min(through);
+        let replies = try_join_all((batch..=end).map(|number| {
+            let first = &first;
+            async move {
+                if number == 1 {
+                    Ok(first.clone())
+                } else {
+                    read_command(hub, session, name, &number.to_string()).await
+                }
+            }
+        }))
+        .await?;
+        for (index, reply) in replies.iter().enumerate() {
+            let items = reply["choices"]
+                .as_array()
+                .context("列表在加载过程中发生变化，请重新打开。")?;
+            if reply["status"] != "completed"
+                || reply["view"] != view
+                || reply["page"].as_u64() != Some(batch + index as u64)
+                || reply["pages"].as_u64() != Some(source_pages)
+                || !reply["text"].is_string()
+                || items.len() > SOURCE_PAGE_SIZE
+            {
+                bail!("列表在加载过程中发生变化，请重新打开。");
+            }
+            let text = reply["text"].as_str().unwrap();
+            for item in items {
+                let value = item["value"]
+                    .as_str()
+                    .context("Pi 返回的列表项无效，请重新打开。")?;
+                if !model {
+                    let prefix = format!("/pi {value}");
+                    entries.push(
+                        text.lines()
+                            .find(|line| {
+                                *line == prefix || line.starts_with(&format!("{prefix} — "))
+                            })
+                            .unwrap_or(&prefix)
+                            .to_string(),
+                    );
+                }
+                choices.push(item.clone());
+            }
         }
-        let text = reply["text"].as_str().unwrap();
-        for item in items {
-            let value = item["value"]
-                .as_str()
-                .context("Pi 返回的列表项无效，请重新打开。")?;
-            let entry = if model {
-                value.to_string()
-            } else {
-                let prefix = format!("/pi {value}");
-                text.lines()
-                    .find(|line| *line == prefix || line.starts_with(&format!("{prefix} — ")))
-                    .unwrap_or(&prefix)
-                    .to_string()
-            };
-            entries.push(entry);
-            choices.push(item.clone());
-        }
+    }
+    if model {
+        let usage = &hub.routes.lock().await.model_usage;
+        choices.sort_by_cached_key(|choice| {
+            let rank = usage
+                .get(choice["value"].as_str().unwrap())
+                .map(|stat| (stat.count, stat.last_used))
+                .unwrap_or_default();
+            Reverse((rank, choice["selected"] == true))
+        });
+        choices = choices
+            .into_iter()
+            .skip((start - 1) as usize * SOURCE_PAGE_SIZE)
+            .take(SOURCE_PAGES_PER_VIEW as usize * SOURCE_PAGE_SIZE)
+            .collect();
+        entries = choices
+            .iter()
+            .map(|choice| choice["value"].as_str().unwrap().to_string())
+            .collect();
     }
     let mut lines = Vec::new();
     if model {

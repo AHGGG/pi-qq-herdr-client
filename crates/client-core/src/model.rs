@@ -1,7 +1,12 @@
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 pub const PROTOCOL: u32 = 1;
+pub(crate) const RECENT_SESSION_LIMIT: usize = 24;
 pub const HERDR_URL: &str = "https://herdr.dev/";
 pub const PI_URL: &str = "https://pi.dev/";
 pub const CREATE_BOT_URL: &str = "https://bot.q.qq.com/wiki/agent-qqbot/#快速创建一个-qq-机器人";
@@ -78,6 +83,7 @@ pub enum Command {
 pub struct Session {
     pub id: String,
     pub session_id: String,
+    pub session_file: Option<PathBuf>,
     pub label: String,
     pub cwd: String,
     pub state: String,
@@ -93,6 +99,15 @@ pub struct Session {
     pub slot: String,
 }
 
+impl Session {
+    pub(crate) fn model_key(&self) -> Option<String> {
+        let model = &self.runtime["model"];
+        let provider = model["provider"].as_str().filter(|s| !s.is_empty())?;
+        let id = model["id"].as_str().filter(|s| !s.is_empty())?;
+        Some(format!("{provider}/{id}"))
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Durable {
@@ -106,10 +121,76 @@ pub struct Durable {
     pub sources: BTreeMap<String, String>,
     pub source_order: Vec<String>,
     pub pending_launches: BTreeMap<String, PendingLaunch>,
+    pub recent_sessions: Vec<RecentSession>,
+    pub recent_sessions_initialized: bool,
+    pub model_usage: BTreeMap<String, ModelUsage>,
     pub seen: Vec<String>,
 }
 
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct ModelUsage {
+    pub count: u64,
+    pub last_used: u64,
+}
+
 impl Durable {
+    pub(crate) fn record_model(&mut self, model: String) {
+        let usage = self.model_usage.entry(model).or_default();
+        usage.count = usage.count.saturating_add(1);
+        usage.last_used = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+    }
+
+    pub(crate) fn remember_session(&mut self, session: &Session, activate: bool) {
+        let existing = self
+            .recent_sessions
+            .iter()
+            .position(|recent| recent.session_id == session.session_id);
+        let previous = existing.map(|index| &self.recent_sessions[index]);
+        let same_directory = previous.filter(|recent| recent.cwd == session.cwd);
+        let recent = RecentSession {
+            peer_id: session.id.clone(),
+            session_id: session.session_id.clone(),
+            session_file: session
+                .session_file
+                .clone()
+                .or_else(|| same_directory.and_then(|r| r.session_file.clone())),
+            cwd: session.cwd.clone(),
+            label: session.label.clone(),
+            workspace: same_directory.and_then(|r| r.workspace.clone()),
+            pid: session.pid,
+            last_seen: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        };
+        if let Some(index) = existing {
+            if !activate && self.recent_sessions[index].peer_id == session.id {
+                self.recent_sessions[index] = recent;
+                return;
+            }
+            self.recent_sessions.remove(index);
+        }
+        self.recent_sessions.insert(0, recent);
+        self.recent_sessions.truncate(RECENT_SESSION_LIMIT);
+    }
+
+    pub(crate) fn set_session_workspace(
+        &mut self,
+        session: &Session,
+        workspace: Option<WorkspaceId>,
+    ) {
+        if let Some(recent) = self
+            .recent_sessions
+            .iter_mut()
+            .find(|recent| recent.peer_id == session.id)
+        {
+            recent.workspace = workspace;
+        }
+    }
+
     pub(crate) fn remember_source(&mut self, reference: String, source: String) {
         // Older state has no order field. Keep unknown-age entries ahead of
         // references whose acceptance order is known (including receipt recovery).
@@ -141,6 +222,29 @@ pub struct PendingLaunch {
     pub terminal: String,
     pub pid: u32,
     pub expires: u64,
+    #[serde(default)]
+    pub workspace: Option<WorkspaceId>,
+    #[serde(default)]
+    pub resume: Option<ResumeTarget>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct RecentSession {
+    pub peer_id: String,
+    pub session_id: String,
+    pub session_file: Option<PathBuf>,
+    pub cwd: String,
+    pub label: String,
+    pub workspace: Option<WorkspaceId>,
+    pub pid: u32,
+    #[serde(default)]
+    pub last_seen: u64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ResumeTarget {
+    pub session_id: String,
+    pub cwd: String,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]

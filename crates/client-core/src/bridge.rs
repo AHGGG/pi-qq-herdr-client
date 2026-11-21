@@ -1,7 +1,9 @@
 use crate::{
+    install::agent_directory,
     media,
     model::{Durable, PROTOCOL, Session},
     outbox::{Delivery, Outbox},
+    sessions::import_known_sessions,
     store::Store,
 };
 use anyhow::{Context, Result, anyhow, bail};
@@ -60,11 +62,23 @@ impl Hub {
         let mut bytes = [0; 32];
         rand::thread_rng().fill_bytes(&mut bytes);
         let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        let mut routes = store.durable()?;
+        if !routes.recent_sessions_initialized && routes.recent_sessions.is_empty() {
+            if let Some(dirs) = directories::BaseDirs::new() {
+                let agent = agent_directory(dirs.home_dir());
+                routes = tokio::task::spawn_blocking(move || {
+                    routes.recent_sessions_initialized =
+                        import_known_sessions(&agent, &mut routes).is_ok();
+                    routes
+                })
+                .await?;
+            }
+        }
         let hub = Self {
             peers: Arc::new(RwLock::new(HashMap::new())),
             pending: Arc::new(Mutex::new(HashMap::new())),
             registrations: Arc::new(Notify::new()),
-            routes: Arc::new(Mutex::new(store.durable()?)),
+            routes: Arc::new(Mutex::new(routes)),
             store,
             outbox,
             events,
@@ -166,6 +180,7 @@ impl Hub {
         {
             bail!("Pi 注册信息过长");
         }
+        session.session_file = session.session_file.filter(|path| path.is_absolute());
         session.reload_token = session
             .reload_token
             .filter(|token| uuid::Uuid::parse_str(token).is_ok());
@@ -178,6 +193,7 @@ impl Hub {
                 routes.slots.insert(session.id.clone(), slot);
             }
             session.slot = routes.slots[&session.id].clone();
+            routes.remember_session(&session, false);
             self.store.save("routing.json", &*routes)?;
         }
         self.peers.write().await.insert(
@@ -202,8 +218,16 @@ impl Hub {
         }
         match message["type"].as_str().unwrap_or_default() {
             "update" => {
-                let mut peers = self.peers.write().await;
-                if let Some(peer) = peers.get_mut(&session.id) {
+                let (recent, used_model) = {
+                    let mut peers = self.peers.write().await;
+                    let peer = peers
+                        .get_mut(&session.id)
+                        .filter(|p| p.session.generation == session.generation)
+                        .context("Pi 连接已替换")?;
+                    let started = peer.session.state == "idle" && message["state"] == "working";
+                    let previous_model = message
+                        .get("runtime")
+                        .and_then(|_| peer.session.model_key());
                     if let Some(label) = message["label"].as_str() {
                         peer.session.label = label.chars().take(140).collect();
                     }
@@ -213,8 +237,24 @@ impl Hub {
                     if let Some(runtime) = message.get("runtime") {
                         peer.session.runtime = runtime.clone();
                     }
-                    if let Some(name) = message["name"].as_str() {
-                        let mut routes = self.routes.lock().await;
+                    let used_model = if started || message.get("runtime").is_some() {
+                        peer.session
+                            .model_key()
+                            .filter(|current| started || Some(current) != previous_model.as_ref())
+                    } else {
+                        None
+                    };
+                    let recent = (started || message["label"].is_string())
+                        .then(|| (peer.session.clone(), started));
+                    (recent, used_model)
+                };
+                let name = message["name"].as_str();
+                if recent.is_some() || name.is_some() || used_model.is_some() {
+                    let mut routes = self.routes.lock().await;
+                    if let Some((current, started)) = recent {
+                        routes.remember_session(&current, started);
+                    }
+                    if let Some(name) = name {
                         if name.is_empty() {
                             routes.names.remove(&session.id);
                         } else {
@@ -222,8 +262,11 @@ impl Hub {
                                 .names
                                 .insert(session.id.clone(), name.chars().take(70).collect());
                         }
-                        self.store.save("routing.json", &*routes)?;
                     }
+                    if let Some(model) = used_model {
+                        routes.record_model(model);
+                    }
+                    self.store.save("routing.json", &*routes)?;
                 }
                 Ok(None)
             }

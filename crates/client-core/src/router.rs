@@ -1524,10 +1524,10 @@ fn command_link(command: &str, label: &str) -> String {
     )
 }
 fn session_list_state(state: &str) -> &'static str {
-    if state == "idle" {
-        ""
-    } else {
-        state_name(state)
+    match state {
+        "idle" => "",
+        "working" => "忙碌",
+        _ => state_name(state),
     }
 }
 fn state_name(state: &str) -> &'static str {

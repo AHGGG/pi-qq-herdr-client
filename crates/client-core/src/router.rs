@@ -297,8 +297,7 @@ impl Router {
         if let Some(s) = &current {
             let name = list_label(&s.label);
             let state = session_list_state(&s.state);
-            let rename = commands::input_link(&format!("/name {} ", s.slot), "重命名");
-            sections.push(format!("当前 Session\n**{name}**{state}\n{rename}"));
+            sections.push(format!("当前 Session\n**{name}**{state}"));
         }
         let online_heading = if current.is_some() {
             "其他在线"
@@ -337,15 +336,20 @@ impl Router {
         if current.is_none() && count == 0 {
             sections.push("暂无在线或可恢复的 Session。".into());
         }
-        let mut buttons =
-            pages_buttons(if all { "/sessions all" } else { "/sessions" }, page, pages);
+        let mut buttons = Vec::new();
+        if let Some(s) = &current {
+            buttons.push(("重命名当前", format!("/name {} ", s.slot)));
+        }
+        buttons.push(("新建 Pi", "/new".into()));
         if workspace_name.is_some() {
             buttons.push(("全部", "/sessions all".into()));
         }
-        buttons.extend([
-            ("Workspaces", "/workspaces".into()),
-            ("新建 Pi", "/new".into()),
-        ]);
+        buttons.push(("Workspaces", "/workspaces".into()));
+        buttons.extend(pages_buttons(
+            if all { "/sessions all" } else { "/sessions" },
+            page,
+            pages,
+        ));
         self.send(&sections.join("\n\n"), None, &buttons).await
     }
 

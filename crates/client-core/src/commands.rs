@@ -276,23 +276,18 @@ fn choice_link(command: &str, label: &str, model: bool) -> String {
     } else {
         label
     };
+    let encoded: String = url::form_urlencoded::byte_serialize(command.as_bytes()).collect();
     let tag = if model {
-        let encoded: String = url::form_urlencoded::byte_serialize(command.as_bytes()).collect();
         format!("<qqbot-cmd-enter text=\"{encoded}\" />")
     } else {
-        input_link(command, &show)
+        let show: String = url::form_urlencoded::byte_serialize(show.as_bytes()).collect();
+        format!("<qqbot-cmd-input text=\"{encoded}\" show=\"{show}\" reference=\"false\" />")
     };
     if command.chars().count() <= 100 && tag.len() <= 1200 {
         tag
     } else {
         markdown_text(command.trim_end())
     }
-}
-
-pub(crate) fn input_link(command: &str, label: &str) -> String {
-    let text: String = url::form_urlencoded::byte_serialize(command.as_bytes()).collect();
-    let show: String = url::form_urlencoded::byte_serialize(label.as_bytes()).collect();
-    format!("<qqbot-cmd-input text=\"{text}\" show=\"{show}\" reference=\"false\" />")
 }
 
 fn command_text(session: &Session, result: &Value) -> String {

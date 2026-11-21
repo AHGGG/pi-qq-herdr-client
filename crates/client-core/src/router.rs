@@ -11,6 +11,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
+    path::Path,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -248,7 +249,7 @@ impl Router {
         if let (false, Some(key), Some(core)) = (all, workspace, &core) {
             let catalog = core.catalog.read().await;
             if let Some(workspace) = catalog.workspaces.iter().find(|w| w.key == key) {
-                workspace_name = Some(list_label(&workspace.name));
+                workspace_name = Some(list_name(&workspace.name));
                 online.retain(|s| {
                     s.terminal
                         .as_ref()
@@ -289,14 +290,27 @@ impl Router {
         let (page, pages, start) = page(page_arg, count, 8)?;
         let mut heading = "Sessions".to_string();
         if let Some(name) = &workspace_name {
-            heading.push_str(&format!(" · {name}"));
+            heading.push_str(&format!(" · {}", markdown_text(name)));
         }
         if pages > 1 {
             heading.push_str(&format!(" · {page}/{pages}"));
         }
         let mut sections = vec![heading];
+        let routes = self.hub.routes.lock().await;
+        let scoped_name = |label: &str, cwd: &str, session_id: &str, peer_id: &str| {
+            workspace_name
+                .as_deref()
+                .filter(|_| !routes.names.contains_key(peer_id))
+                .and_then(|workspace| {
+                    let folder = Path::new(cwd).file_name()?.to_str()?;
+                    let short_id = session_id.get(..6)?;
+                    (workspace == list_name(folder) && label == format!("{folder} {short_id}"))
+                        .then(|| format!("未命名 {short_id}"))
+                })
+                .unwrap_or_else(|| label.to_owned())
+        };
         if let Some(s) = &current {
-            let name = list_label(&s.label);
+            let name = list_label(&scoped_name(&s.label, &s.cwd, &s.session_id, &s.id));
             let state = selection_detail(session_list_state(&s.state));
             sections.push(format!("当前 · **{name}**{state}"));
         }
@@ -308,14 +322,19 @@ impl Router {
         let live_rows = online.iter().map(|s| {
             (
                 online_heading,
-                &s.label,
+                scoped_name(&s.label, &s.cwd, &s.session_id, &s.id),
                 format!("/use {}", s.slot),
                 session_list_state(&s.state),
             )
         });
-        let saved_rows = offline
-            .iter()
-            .map(|(slot, s)| ("最近可恢复", &s.label, format!("/resume {slot}"), ""));
+        let saved_rows = offline.iter().map(|(slot, s)| {
+            (
+                "最近可恢复",
+                scoped_name(&s.label, &s.cwd, &s.session_id, &s.peer_id),
+                format!("/resume {slot}"),
+                "",
+            )
+        });
         let mut last_heading = "";
         for (heading, name, command, state) in live_rows.chain(saved_rows).skip(start).take(8) {
             if heading != last_heading {
@@ -325,8 +344,9 @@ impl Router {
                 sections.push(heading.to_string());
                 last_heading = heading;
             }
-            sections.push(session_row(name, &command, state));
+            sections.push(session_row(&name, &command, state));
         }
+        drop(routes);
         if current.is_none() && count == 0 {
             sections.push("暂无在线或可恢复的 Session。".into());
         }

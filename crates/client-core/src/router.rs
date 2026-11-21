@@ -296,8 +296,13 @@ impl Router {
         let mut sections = vec![heading];
         if let Some(s) = &current {
             let name = list_label(&s.label);
+            let mut heading = format!("当前 · **{name}**");
             let state = session_list_state(&s.state);
-            sections.push(format!("当前 · **{name}**{state}"));
+            if !state.is_empty() {
+                heading.push_str(" · ");
+                heading.push_str(state);
+            }
+            sections.push(heading);
         }
         let online_heading = if current.is_some() {
             "其他在线"
@@ -312,26 +317,19 @@ impl Router {
                 session_list_state(&s.state),
             )
         });
-        let saved_rows = offline.iter().map(|(slot, s)| {
-            (
-                "最近可恢复",
-                &s.label,
-                format!("/resume {slot}"),
-                String::new(),
-            )
-        });
+        let saved_rows = offline
+            .iter()
+            .map(|(slot, s)| ("最近可恢复", &s.label, format!("/resume {slot}"), ""));
         let mut last_heading = "";
         for (heading, name, command, state) in live_rows.chain(saved_rows).skip(start).take(8) {
             if heading != last_heading {
+                if sections.len() > 1 {
+                    sections.push("***".into());
+                }
                 sections.push(heading.to_string());
                 last_heading = heading;
             }
-            let section = sections.last_mut().unwrap();
-            section.push_str(&format!(
-                "\n{} · {}{state}",
-                list_label(name),
-                command_link(&command, "")
-            ));
+            sections.push(selection_row(name, &command, false, state));
         }
         if current.is_none() && count == 0 {
             sections.push("暂无在线或可恢复的 Session。".into());
@@ -1525,14 +1523,14 @@ fn command_link(command: &str, label: &str) -> String {
         url::form_urlencoded::byte_serialize(text.as_bytes()).collect::<String>()
     )
 }
-fn session_list_state(state: &str) -> String {
+fn session_list_state(state: &str) -> &'static str {
     if state == "idle" {
-        String::new()
+        ""
     } else {
-        format!(" · {}", state_name(state))
+        state_name(state)
     }
 }
-fn state_name(state: &str) -> &str {
+fn state_name(state: &str) -> &'static str {
     match state {
         "idle" => "可发送消息",
         "working" => "正在处理任务",
